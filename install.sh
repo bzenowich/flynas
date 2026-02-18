@@ -30,7 +30,7 @@ fi
 # --- Packages ---
 
 step "Installing packages"
-pkg install -y openresty git sqlite3 lua51-cjson
+pkg install -y openresty git sqlite3 lua51-cjson libargon2
 
 # --- User/Group ---
 
@@ -41,6 +41,9 @@ fi
 if ! pw usershow "$FLYNAS_USER" >/dev/null 2>&1; then
     pw useradd "$FLYNAS_USER" -g "$FLYNAS_GROUP" -d /nonexistent -s /usr/sbin/nologin -c "FlyNAS service"
 fi
+
+# Add www user to flynas group (for nginx worker DB access)
+pw groupmod "$FLYNAS_GROUP" -m www
 
 # --- Deploy overlay ---
 
@@ -64,8 +67,9 @@ step "Creating database"
 DB_FILE="${FLYNAS_DIR}/flynas.db"
 if [ ! -f "$DB_FILE" ]; then
     touch "$DB_FILE"
-    chown "${FLYNAS_USER}:${FLYNAS_GROUP}" "$DB_FILE"
 fi
+chown "${FLYNAS_USER}:${FLYNAS_GROUP}" "$DB_FILE"
+chmod 664 "$DB_FILE"
 
 # --- Self-signed SSL cert (if none exists) ---
 
