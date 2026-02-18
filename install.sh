@@ -50,6 +50,17 @@ pw groupmod "$FLYNAS_GROUP" -m www
 step "Deploying files"
 cp -R "${OVERLAY_DIR}/" /
 
+# --- Compile and install setuid helper ---
+
+step "Building flynas-helper"
+HELPER_SRC="${FLYNAS_DIR}/scripts/flynas-helper.c"
+HELPER_BIN_DIR="${FLYNAS_DIR}/bin"
+HELPER_BIN="${HELPER_BIN_DIR}/flynas-helper"
+mkdir -p "$HELPER_BIN_DIR"
+cc -o "$HELPER_BIN" "$HELPER_SRC"
+chown root:"$FLYNAS_GROUP" "$HELPER_BIN"
+chmod 4750 "$HELPER_BIN"
+
 # --- Directory permissions ---
 
 step "Setting permissions"

@@ -10,14 +10,38 @@ CREATE TABLE IF NOT EXISTS users (
     pubkey TEXT,
     shell TEXT DEFAULT '/bin/sh',
     ssh_enabled INTEGER DEFAULT 0,
+    email TEXT,
+    email_verified INTEGER DEFAULT 0,
+    totp_secret TEXT,
+    totp_enabled INTEGER DEFAULT 0,
+    is_admin INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    state TEXT DEFAULT 'active',
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ssh_keys (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS email_codes (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('login', 'verify_email')),
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    used INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS groups (
