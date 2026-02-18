@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# PROVIDE: flynas
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="flynas"
+rcvar="flynas_enable"
+pidfile="/var/run/flynas/nginx.pid"
+command="/usr/local/bin/openresty"
+command_args="-p /usr/local/flynas"
+
+flynas_start() {
+    echo "Starting ${name}."
+    ${command} ${command_args}
+}
+
+flynas_stop() {
+    echo "Stopping ${name}."
+    ${command} ${command_args} -s stop
+}
+
+flynas_reload() {
+    echo "Reloading ${name}."
+    ${command} ${command_args} -s reload
+}
+
+flynas_status() {
+    if [ -f "${pidfile}" ] && kill -0 $(cat "${pidfile}") 2>/dev/null; then
+        echo "${name} is running as pid $(cat ${pidfile})."
+    else
+        echo "${name} is not running."
+        return 1
+    fi
+}
+
+start_cmd="flynas_start"
+stop_cmd="flynas_stop"
+reload_cmd="flynas_reload"
+status_cmd="flynas_status"
+extra_commands="reload status"
+
+load_rc_config $name
+run_rc_command "$1"
