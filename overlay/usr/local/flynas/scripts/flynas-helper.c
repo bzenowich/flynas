@@ -14,6 +14,9 @@
 #include <ctype.h>
 #include <pwd.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/param.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -33,6 +36,11 @@
 #define UMOUNT_CMD "/sbin/umount"
 #define FSTAB_PATH "/etc/fstab"
 #define DATA_ROOT "/data"
+#define SERVICE_CMD "/usr/sbin/service"
+#define RCCONF_PATH "/etc/rc.conf"
+#define ZONEINFO_DIR "/usr/share/zoneinfo"
+#define LOCALTIME_PATH "/etc/localtime"
+#define ZONEDB_PATH "/var/db/zoneinfo"
 
 static const char *allowed_shells[] = {
     "/bin/sh",
@@ -474,6 +482,196 @@ static int do_voldestroy(const char *label)
     return 0;
 }
 
+/* ---- Network / time configuration ---------------------------- */
+
+/* Validate interface name: ^[a-z]+[0-9]+$ (vtnet0, em0, re0) */
+static int valid_iface(const char *s)
+{
+    return valid_disk(s);
+}
+
+static int valid_ipv4(const char *s)
+{
+    struct in_addr a;
+    return s && inet_pton(AF_INET, s, &a) == 1;
+}
+
+/* Hostname for NTP: letters, digits, dot, dash */
+static int valid_hostname(const char *s)
+{
+    size_t len;
+
+    if (!s || !*s)
+        return 0;
+    len = strlen(s);
+    if (len > 255)
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!(isalnum((unsigned char)c) || c == '.' || c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+/* Replace every "key=..." line in rc.conf with key="value" (or drop
+ * it when value is NULL); appends if absent. Atomic via rename.
+ * rc.conf accumulates duplicates (installer + harness) — all
+ * occurrences are removed so the appended line wins. */
+static void rcconf_set(const char *key, const char *value)
+{
+    FILE *in, *out;
+    char line[1024];
+    char tmppath[] = RCCONF_PATH ".flynas.tmp";
+    size_t keylen = strlen(key);
+
+    in = fopen(RCCONF_PATH, "r");
+    if (!in)
+        die("cannot read rc.conf");
+    out = fopen(tmppath, "w");
+    if (!out) {
+        fclose(in);
+        die("cannot write rc.conf temp file");
+    }
+    while (fgets(line, sizeof(line), in)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (strncmp(p, key, keylen) == 0 && p[keylen] == '=')
+            continue;
+        fputs(line, out);
+    }
+    if (value)
+        fprintf(out, "%s=\"%s\"\n", key, value);
+    fclose(in);
+    if (fclose(out) != 0)
+        die("rc.conf write failed");
+    if (chmod(tmppath, 0644) != 0 || rename(tmppath, RCCONF_PATH) != 0)
+        die("rc.conf rename failed");
+}
+
+static int run_service(const char *name, const char *action)
+{
+    char *args[] = { "service", (char *)name, (char *)action, NULL };
+    return run(SERVICE_CMD, args);
+}
+
+/* netconfig <iface> dhcp
+ * netconfig <iface> static <ip> <netmask> <gateway>
+ * Writes rc.conf and restarts netif (+ routing for static). The
+ * caller's HTTP connection may drop if the address changes. */
+static int do_netconfig(int argc, char *argv[])
+{
+    const char *iface = argv[2];
+    const char *mode = argv[3];
+    char key[64], value[128];
+    int rc;
+
+    if (!valid_iface(iface))
+        die("invalid interface name");
+    snprintf(key, sizeof(key), "ifconfig_%s", iface);
+
+    if (strcmp(mode, "dhcp") == 0) {
+        if (argc != 4)
+            die("usage: flynas-helper netconfig <iface> dhcp");
+        rcconf_set(key, "DHCP");
+        rcconf_set("defaultrouter", NULL);  /* DHCP supplies the route */
+    } else if (strcmp(mode, "static") == 0) {
+        if (argc != 7)
+            die("usage: flynas-helper netconfig <iface> static <ip> <netmask> <gateway>");
+        if (!valid_ipv4(argv[4]) || !valid_ipv4(argv[5]) || !valid_ipv4(argv[6]))
+            die("invalid IPv4 address");
+        snprintf(value, sizeof(value), "inet %s netmask %s", argv[4], argv[5]);
+        rcconf_set(key, value);
+        rcconf_set("defaultrouter", argv[6]);
+    } else {
+        die("netconfig: unknown mode (use dhcp or static)");
+    }
+
+    rc = run_service("netif", "restart");
+    if (rc != 0)
+        die("netif restart failed");
+    /* routing restart installs/clears the static default route;
+     * under DHCP dhclient handles it */
+    if (strcmp(mode, "static") == 0) {
+        rc = run_service("routing", "restart");
+        if (rc != 0)
+            die("routing restart failed");
+    }
+    return 0;
+}
+
+/* timezone <zone>: copy /usr/share/zoneinfo/<zone> to /etc/localtime
+ * and record the name in /var/db/zoneinfo (like tzsetup) */
+static int do_timezone(const char *zone)
+{
+    char src[512], buf[8192];
+    struct stat st;
+    FILE *in, *out;
+    size_t n;
+
+    if (!zone || !*zone || strlen(zone) > 64 || zone[0] == '/' ||
+        strstr(zone, ".."))
+        die("invalid timezone");
+    for (const char *p = zone; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '/' || *p == '_' ||
+              *p == '-' || *p == '+'))
+            die("invalid timezone");
+    }
+
+    snprintf(src, sizeof(src), "%s/%s", ZONEINFO_DIR, zone);
+    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode))
+        die("unknown timezone");
+
+    in = fopen(src, "r");
+    if (!in)
+        die("cannot read zoneinfo file");
+    out = fopen(LOCALTIME_PATH ".flynas.tmp", "w");
+    if (!out) {
+        fclose(in);
+        die("cannot write localtime temp file");
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            die("localtime write failed");
+        }
+    }
+    fclose(in);
+    if (fclose(out) != 0)
+        die("localtime write failed");
+    if (chmod(LOCALTIME_PATH ".flynas.tmp", 0644) != 0 ||
+        rename(LOCALTIME_PATH ".flynas.tmp", LOCALTIME_PATH) != 0)
+        die("localtime rename failed");
+
+    out = fopen(ZONEDB_PATH, "w");
+    if (!out)
+        die("cannot write " ZONEDB_PATH);
+    fprintf(out, "%s\n", zone);
+    fclose(out);
+    return 0;
+}
+
+/* ntp <server>: enable dntpd against the given server
+ * ntp off: disable dntpd */
+static int do_ntp(const char *server)
+{
+    if (strcmp(server, "off") == 0) {
+        rcconf_set("dntpd_enable", "NO");
+        /* onestop: plain stop refuses once dntpd_enable=NO */
+        run_service("dntpd", "onestop");
+        return 0;
+    }
+    if (!valid_hostname(server))
+        die("invalid NTP server");
+    rcconf_set("dntpd_enable", "YES");
+    rcconf_set("dntpd_flags", server);
+    if (run_service("dntpd", "restart") != 0)
+        die("dntpd restart failed");
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     int rc;
@@ -641,6 +839,21 @@ int main(int argc, char *argv[])
         snprintf(mountpoint, sizeof(mountpoint), "%s/%s", DATA_ROOT, argv[2]);
         char *args[] = { "hammer2", "-s", mountpoint, "volume-list", NULL };
         rc = run(HAMMER2_CMD, args);
+
+    } else if (strcmp(cmd, "netconfig") == 0) {
+        if (argc < 4)
+            die("usage: flynas-helper netconfig <iface> dhcp|static ...");
+        rc = do_netconfig(argc, argv);
+
+    } else if (strcmp(cmd, "timezone") == 0) {
+        if (argc != 3)
+            die("usage: flynas-helper timezone <zone>");
+        rc = do_timezone(argv[2]);
+
+    } else if (strcmp(cmd, "ntp") == 0) {
+        if (argc != 3)
+            die("usage: flynas-helper ntp <server>|off");
+        rc = do_ntp(argv[2]);
 
     } else {
         die("unknown command");

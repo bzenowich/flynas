@@ -6,6 +6,7 @@ local groups_api = require("api.groups")
 local settings_api = require("api.settings")
 local dashboard_api = require("api.dashboard")
 local storage_api = require("api.storage")
+local network_api = require("api.network")
 
 local uri = ngx.var.uri
 local method = ngx.req.get_method()
@@ -129,6 +130,31 @@ local routes = {
 
     ["POST:volumes"] = function()
         storage_api.create(read_body())
+    end,
+
+    -- Network
+    ["GET:network/config"] = function()
+        network_api.get_config()
+    end,
+
+    ["PUT:network/config"] = function()
+        network_api.set_config(read_body())
+    end,
+
+    ["GET:network/timezone"] = function()
+        network_api.get_timezone()
+    end,
+
+    ["PUT:network/timezone"] = function()
+        network_api.set_timezone(read_body())
+    end,
+
+    ["GET:network/ntp"] = function()
+        network_api.get_ntp()
+    end,
+
+    ["PUT:network/ntp"] = function()
+        network_api.set_ntp(read_body())
     end,
 
     -- Settings

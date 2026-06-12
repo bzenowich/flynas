@@ -91,6 +91,23 @@ function _M.vol_scrub(label)
     return run({ "scrub", label })
 end
 
+function _M.net_dhcp(iface)
+    return run({ "netconfig", iface, "dhcp" })
+end
+
+function _M.net_static(iface, ip, netmask, gateway)
+    return run({ "netconfig", iface, "static", ip, netmask, gateway })
+end
+
+function _M.set_timezone(zone)
+    return run({ "timezone", zone })
+end
+
+-- server = nil disables NTP
+function _M.set_ntp(server)
+    return run({ "ntp", server or "off" })
+end
+
 function _M.write_ssh_keys(username, keys_text)
     return run_with_stdin({ "sshkeys", username, "write" }, keys_text)
 end

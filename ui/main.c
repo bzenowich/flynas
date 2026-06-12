@@ -57,8 +57,9 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 #define MAX_ROWS 16
 // 0..12287 dashboard (reset each poll), 12288..16383 auth strings,
 // 16384..32767 QR code data URL, 32768..49151 accounts page,
-// 49152..65535 storage page — keep in sync with index.html
-#define STRING_POOL_SIZE 65536
+// 49152..65535 storage page, 65536..81919 network page — keep in
+// sync with index.html
+#define STRING_POOL_SIZE 81920
 
 typedef struct {
     Clay_String name;
@@ -215,7 +216,7 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 
 // ---------------------------------------------------------------
 // Accounts page state, populated from JS like the dashboard.
-// Button presses are queued as packed page actions: low 4 bits =
+// Button presses are queued as packed page actions: low 6 bits =
 // action code, remaining bits = row id. JS drains the queue each
 // frame via TakePageAction() and performs the API call.
 // ---------------------------------------------------------------
@@ -234,7 +235,12 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_VOL_SCRUB       12
 #define PACT_DISK_TOGGLE     13
 #define PACT_SCRUB_TOGGLE    14
-#define PACT_PACK(action, arg) ((action) | ((arg) << 4))
+#define PACT_NET_MODE        15
+#define PACT_NET_APPLY       16
+#define PACT_TZ_SAVE         17
+#define PACT_NTP_SAVE        18
+// Low 6 bits = action code, remaining bits = row id
+#define PACT_PACK(action, arg) ((action) | ((arg) << 6))
 
 typedef struct {
     int id;
@@ -445,6 +451,53 @@ void HandleVolDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, voi
             storPendingDeleteVol = vid;
         }
     }
+}
+
+// ---------------------------------------------------------------
+// Network page state, same JS-feeds-C pattern. The apply button is
+// armed by JS (first click) and fires on the second click since a
+// netif restart can drop the session.
+// ---------------------------------------------------------------
+static Clay_String netIface, netMac, netLive;
+static bool netDhcp = true;
+static bool netApplyArmed = false;
+static Clay_String netIpInput, netMaskInput, netGwInput;
+static Clay_String netTzInput, netNtpInput;
+static Clay_String netNtpState;
+static Clay_String netError, netInfo;
+
+CLAY_WASM_EXPORT("SetNetConfig")
+void SetNetConfig(uint32_t ifaceOff, uint32_t ifaceLen,
+                  uint32_t macOff, uint32_t macLen,
+                  uint32_t liveOff, uint32_t liveLen,
+                  uint32_t ntpStateOff, uint32_t ntpStateLen,
+                  bool dhcp, bool armed) {
+    netIface = poolString(ifaceOff, ifaceLen);
+    netMac = poolString(macOff, macLen);
+    netLive = poolString(liveOff, liveLen);
+    netNtpState = poolString(ntpStateOff, ntpStateLen);
+    netDhcp = dhcp;
+    netApplyArmed = armed;
+}
+
+CLAY_WASM_EXPORT("SetNetInputs")
+void SetNetInputs(uint32_t ipOff, uint32_t ipLen,
+                  uint32_t maskOff, uint32_t maskLen,
+                  uint32_t gwOff, uint32_t gwLen,
+                  uint32_t tzOff, uint32_t tzLen,
+                  uint32_t ntpOff, uint32_t ntpLen) {
+    netIpInput = poolString(ipOff, ipLen);
+    netMaskInput = poolString(maskOff, maskLen);
+    netGwInput = poolString(gwOff, gwLen);
+    netTzInput = poolString(tzOff, tzLen);
+    netNtpInput = poolString(ntpOff, ntpLen);
+}
+
+CLAY_WASM_EXPORT("SetNetMsg")
+void SetNetMsg(uint32_t errOff, uint32_t errLen,
+               uint32_t infoOff, uint32_t infoLen) {
+    netError = poolString(errOff, errLen);
+    netInfo = poolString(infoOff, infoLen);
 }
 
 // ---------------------------------------------------------------
@@ -985,6 +1038,119 @@ void StoragePage(void) {
     }
 }
 
+// ---------------------------------------------------------------
+// Network page
+// ---------------------------------------------------------------
+void LabeledInput(Clay_String label, Clay_ElementId id, Clay_String value,
+                  Clay_String placeholder, int focusIndex) {
+    CLAY_AUTO_ID({ .layout = {
+        .sizing = { .width = CLAY_SIZING_GROW(0) },
+        .childGap = 10,
+        .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+    } }) {
+        CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_FIXED(110) } } }) {
+            CLAY_TEXT(label, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        TextInputBox(id, value, placeholder, focusIndex);
+    }
+}
+
+void NetConfigCard(void) {
+    CARD("NetConfigCard") {
+        CardTitle(CLAY_STRING("IP Configuration"));
+        InfoLine(CLAY_STRING("Interface"), netIface);
+        InfoLine(CLAY_STRING("MAC"), netMac);
+        InfoLine(CLAY_STRING("Current"), netLive);
+        CLAY(CLAY_ID("NetModeRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CLAY_TEXT(CLAY_STRING("Mode"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("NetMode"),
+                netDhcp ? CLAY_STRING("DHCP") : CLAY_STRING("Static"),
+                COLOR_ACCENT, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_NET_MODE, 0));
+        }
+        if (!netDhcp) {
+            LabeledInput(CLAY_STRING("IP address"), CLAY_ID("NetIp"),
+                netIpInput, CLAY_STRING("192.168.1.10"), 3);
+            LabeledInput(CLAY_STRING("Netmask"), CLAY_ID("NetMask"),
+                netMaskInput, CLAY_STRING("255.255.255.0"), 4);
+            LabeledInput(CLAY_STRING("Gateway"), CLAY_ID("NetGw"),
+                netGwInput, CLAY_STRING("192.168.1.1"), 5);
+        }
+        CLAY(CLAY_ID("NetApplyRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+        } }) {
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("NetApply"),
+                netApplyArmed ? CLAY_STRING("Restart network?") : CLAY_STRING("Apply"),
+                netApplyArmed ? COLOR_WARN : COLOR_ACCENT, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_NET_APPLY, 0));
+        }
+    }
+}
+
+void NetTimeCard(void) {
+    CLAY(CLAY_ID("NetTimeCard"), {
+        .layout = {
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .sizing = { .width = CLAY_SIZING_FIXED(420) },
+            .padding = CLAY_PADDING_ALL(20),
+            .childGap = 12,
+        },
+        .backgroundColor = COLOR_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+    }) {
+        CardTitle(CLAY_STRING("Time"));
+        LabeledInput(CLAY_STRING("Timezone"), CLAY_ID("NetTz"),
+            netTzInput, CLAY_STRING("America/New_York"), 6);
+        CLAY(CLAY_ID("NetTzRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 10 } }) {
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("NetTzSave"), CLAY_STRING("Save timezone"),
+                COLOR_ACCENT, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_TZ_SAVE, 0));
+        }
+        LabeledInput(CLAY_STRING("NTP server"), CLAY_ID("NetNtp"),
+            netNtpInput, CLAY_STRING("pool.ntp.org"), 7);
+        CLAY(CLAY_ID("NetNtpRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CLAY_TEXT(netNtpState, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("NetNtpSave"), CLAY_STRING("Save NTP"),
+                COLOR_ACCENT, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_NTP_SAVE, 0));
+        }
+    }
+}
+
+void NetworkPage(void) {
+    CLAY(CLAY_ID("NetworkRow"), { .layout = {
+        .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
+        NetConfigCard();
+        NetTimeCard();
+    }
+    if (netError.length > 0) {
+        CLAY_TEXT(netError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+    }
+    if (netInfo.length > 0) {
+        CLAY_TEXT(netInfo, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_GOOD }));
+    }
+}
+
 void AccountsPage(void) {
     CLAY(CLAY_ID("AccountsRow"), { .layout = {
         .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
@@ -1229,6 +1395,8 @@ Clay_RenderCommandArray CreateLayout(float deltaTime) {
             }) {
                 if (activePage == 0) {
                     DashboardPage();
+                } else if (activePage == 2) {
+                    NetworkPage();
                 } else if (activePage == 3) {
                     AccountsPage();
                 } else if (activePage == 4) {

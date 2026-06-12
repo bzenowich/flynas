@@ -281,16 +281,21 @@ Implementation: Each Lua handler calls shell commands via `io.popen()` or `ngx.p
 
 **Status: DONE** — all six endpoints implemented (`api/dashboard.lua`).
 
-### 2.3 Network API
+### 2.3 Network API — DONE (diverged: dntpd, not ntpd)
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/network/config` | GET | Current IP, netmask, gateway, DHCP status, MAC |
+| `/api/network/config` | GET | Current IP, netmask, gateway, DHCP status, MAC (rc.conf + ifconfig + `route -n get default`) |
 | `/api/network/config` | PUT | Set static IP or DHCP mode |
-| `/api/network/timezone` | GET/PUT | Time zone (`/etc/localtime` symlink) |
-| `/api/network/ntp` | GET/PUT | NTP server (`/etc/ntp.conf`) |
+| `/api/network/timezone` | GET/PUT | Time zone (copies `/usr/share/zoneinfo/<zone>` to `/etc/localtime`, records name in `/var/db/zoneinfo` like tzsetup — not a symlink on DragonFly) |
+| `/api/network/ntp` | GET/PUT | NTP server. **Plan change:** DragonFly base ships dntpd(8), not ntpd — no `/etc/ntp.conf`. Server lives in rc.conf `dntpd_flags`; empty server disables (`dntpd_enable="NO"` + onestop) |
 
-Implementation: Writes to `/etc/rc.conf` for network config. Runs `service netif restart` to apply.
+Implementation: GETs read rc.conf/ifconfig unprivileged. PUTs go through
+`flynas-helper` (`netconfig`, `timezone`, `ntp`): it validates IPs with
+inet_pton, rejects timezone path traversal, rewrites rc.conf atomically
+(deduplicating repeated keys), then runs `service netif restart`
+(+ `routing restart` for static). The HTTP response can be lost if the
+address changes — the UI arms the Apply button (two-click) and warns.
 
 ### 2.4 Accounts API
 
@@ -498,7 +503,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Remaining pages are placeholders.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Remaining pages are placeholders.
 
 ---
 
@@ -568,7 +573,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 | 3 | OpenResty skeleton + auth | 2 | ✅ done (passwordless TOTP/email) |
 | 4 | Dashboard API (system stats) | 3 | ✅ done |
 | 5 | Clay UI scaffold + dashboard page | 4 | ✅ done (incl. login/setup flow + QR) |
-| 6 | Network API + UI | 3 | — |
+| 6 | Network API + UI | 3 | ✅ done |
 | 7 | Accounts API + UI | 3 | ✅ done |
 | 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | ✅ done |
 | 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | — |
@@ -590,6 +595,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Progress Log
 
+- **2026-06-12 (later)**: Step 6 done. Network API (config/timezone/ntp) + helper commands (`netconfig`/`timezone`/`ntp`) + Network page in Clay UI. Verified on h2dev: DHCP→static→DHCP round-trip survives netif restart (slirp re-DHCPs), timezone EDT/UTC round-trip, traversal rejected, NTP enable/disable. Plan changes: dntpd not ntpd (server in rc.conf `dntpd_flags`); `/etc/localtime` is a copy not symlink (+ `/var/db/zoneinfo`). Gotchas: `service X stop` refuses once `X_enable="NO"` — use `onestop`; UI tests need preconditions seeded (tank volume, testuser1/testgrp) and poll-based waits (newfs can take 20s, /api/disks smartctl probes are slow).
 - **2026-06-12**: Steps 7+8 done. Accounts: keypair endpoint, Accounts page (users/groups/membership/SSH/keygen-download), verified in headless Chrome. Storage: helper volcreate/voldestroy/scrub/vollist, storage API, Storage page (disk picker, create/delete/scrub), verified end-to-end on vbd1–vbd4. Found+fixed: (1) user/group DELETE silently failed via user_groups FK (no cascade); (2) **LuaJIT `pipe:close()` on this platform always returns true** — all helper exit codes were swallowed; exec.lua/users.lua now append an in-band `EXIT:<code>` marker. Plan change: no `volume-add`/`volume-del` on DragonFly 6.4 (open question 3 resolved). Test volumes removed from h2dev afterwards — fstab entries pointing at harness scratch disks would break boot when the harness regenerates them.
 - **2026-06-11**: Login/setup flow in Clay UI — auth screens in C, state machine + keyboard input in JS, public `GET /api/setup/status`, TOTP QR code on setup screen (vendored qrcode-generator). Fixed `is_setup_done` error swallowing. Verified end-to-end in headless Chrome against h2dev (login → TOTP → dashboard; QR decodes to correct otpauth URI).
 - **Earlier**: VM bootstrap (openresty, argon2, setuid helper), session auth → passwordless conversion, dashboard API + Clay dashboard page.

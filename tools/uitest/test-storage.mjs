@@ -75,7 +75,13 @@ try {
     console.log('login: OK');
 
     await clickText(page, 'Storage');
-    await sleep(1500);
+    // /api/disks shells out to smartctl per disk; loading can be slow
+    let loaded = false;
+    for (let i = 0; i < 15 && !loaded; i++) {
+        await sleep(1000);
+        loaded = !!(await findText(page, 'vbd0'));
+    }
+    if (!loaded) throw new Error('storage page did not load');
     await page.screenshot({ path: '/tmp/flynas-uitest/storage-1.png' });
 
     for (const t of ['Volumes', 'Disks', 'tank']) {
@@ -110,9 +116,14 @@ try {
     await sleep(200);
     await page.keyboard.type('pool');
     await clickText(page, 'Create');
-    await sleep(6000); // newfs + mount takes a few seconds
-    if (!(await findText(page, 'pool'))) throw new Error('pool volume missing after create');
-    if (!(await findText(page, 'vbd3, vbd4'))) throw new Error('pool disk list wrong');
+    // newfs + mount can take anywhere from a few seconds to ~20s
+    let created = false;
+    for (let i = 0; i < 15 && !created; i++) {
+        await sleep(2000);
+        created = !!(await findText(page, 'vbd3, vbd4'));
+    }
+    if (!created) throw new Error('pool volume missing after create');
+    if (!(await findText(page, 'pool'))) throw new Error('pool volume name missing');
     console.log('create volume via UI: OK');
 
     // Two-click delete on tank

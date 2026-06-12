@@ -288,6 +288,7 @@
     const QR_POOL_SIZE = 16384;
     const ACCOUNTS_POOL_BASE = 32768;
     const STOR_POOL_BASE = 49152;
+    const NET_POOL_BASE = 65536;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -454,6 +455,8 @@
                 handleAccountsKey(event);
             } else if (page === PAGE_STORAGE) {
                 handleStorageKey(event);
+            } else if (page === PAGE_NETWORK) {
+                handleNetworkKey(event);
             }
             return;
         }
@@ -603,7 +606,11 @@
     }
 
     function handlePageAction(packed) {
-        const action = packed & 15, arg = packed >> 4;
+        const action = packed & 63, arg = packed >> 6;
+        if (action >= 15) {
+            handleNetworkAction(action, arg);
+            return;
+        }
         if (action >= 10) {
             handleStorageAction(action, arg);
             return;
@@ -800,6 +807,157 @@
         } else if (event.key.length === 1 && storInput.length < 16) {
             storInput += event.key;
             syncStorage();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
+    // ----------------------------------------------------------------
+    // Network page: IP config (DHCP/static), timezone, NTP. Apply is
+    // two-click (armed) because a netif restart can drop the session.
+    // ----------------------------------------------------------------
+    const PAGE_NETWORK = 2;
+    const PACT_NET_MODE = 15, PACT_NET_APPLY = 16, PACT_TZ_SAVE = 17,
+          PACT_NTP_SAVE = 18;
+
+    let netConfig = {}, netNtp = {};
+    let netDhcp = true, netArmed = false;
+    // focus indices 3..7 (see TextInputBox in main.c) map to these keys
+    let netInputs = { ip: '', mask: '', gw: '', tz: '', ntp: '' };
+    let netError = '', netInfo = '';
+
+    function syncNetwork() {
+        let off = NET_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 128));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        const iface = write(netConfig.interface || '-');
+        const mac = write(netConfig.mac || '-');
+        const live = write(netConfig.ip
+            ? netConfig.ip + ' / ' + (netConfig.netmask || '?')
+                + (netConfig.gateway ? ' via ' + netConfig.gateway : '')
+            : '-');
+        const ntpState = write(netNtp.enabled ? 'NTP enabled' : 'NTP disabled');
+        instance.exports.SetNetConfig(iface.off, iface.len, mac.off, mac.len,
+            live.off, live.len, ntpState.off, ntpState.len,
+            netDhcp ? 1 : 0, netArmed ? 1 : 0);
+        const ip = write(netInputs.ip), mask = write(netInputs.mask),
+              gw = write(netInputs.gw), tz = write(netInputs.tz),
+              ntp = write(netInputs.ntp);
+        instance.exports.SetNetInputs(ip.off, ip.len, mask.off, mask.len,
+            gw.off, gw.len, tz.off, tz.len, ntp.off, ntp.len);
+        const err = write(netError), info = write(netInfo);
+        instance.exports.SetNetMsg(err.off, err.len, info.off, info.len);
+    }
+
+    async function loadNetwork() {
+        try {
+            const [cfg, tz, ntp] = await Promise.all([
+                getJSON('/api/network/config'),
+                getJSON('/api/network/timezone'),
+                getJSON('/api/network/ntp')]);
+            netConfig = cfg;
+            netNtp = ntp;
+            netDhcp = !!cfg.dhcp;
+            netArmed = false;
+            netInputs.ip = cfg.ip || '';
+            netInputs.mask = cfg.netmask || '';
+            netInputs.gw = cfg.gateway || '';
+            netInputs.tz = tz.timezone || '';
+            netInputs.ntp = ntp.server || '';
+        } catch (err) {
+            netError = 'load failed: ' + err;
+        }
+        syncNetwork();
+    }
+
+    async function netMutate(promise, okMsg) {
+        netError = '';
+        netInfo = 'Applying...';
+        syncNetwork();
+        let msg = '', err = '';
+        try {
+            const { ok, data } = await promise;
+            if (ok) msg = okMsg;
+            else err = data.error || 'request failed';
+        } catch (e) {
+            err = 'network error';
+        }
+        await loadNetwork();
+        netInfo = msg;
+        netError = err;
+        syncNetwork();
+    }
+
+    function handleNetworkAction(action, arg) {
+        switch (action) {
+            case PACT_NET_MODE:
+                netDhcp = !netDhcp;
+                netArmed = false;
+                netInfo = '';
+                syncNetwork();
+                break;
+            case PACT_NET_APPLY:
+                if (!netDhcp && !(netInputs.ip && netInputs.mask && netInputs.gw)) {
+                    netError = 'IP, netmask and gateway are required for static mode';
+                    netArmed = false;
+                    syncNetwork();
+                    break;
+                }
+                if (!netArmed) {
+                    netArmed = true;
+                    netError = '';
+                    netInfo = 'Networking will restart — click again to confirm';
+                    syncNetwork();
+                    break;
+                }
+                netArmed = false;
+                netMutate(sendJSON('PUT', '/api/network/config', netDhcp
+                    ? { dhcp: true }
+                    : { dhcp: false, ip: netInputs.ip, netmask: netInputs.mask,
+                        gateway: netInputs.gw }), 'Network config applied');
+                break;
+            case PACT_TZ_SAVE:
+                if (!netInputs.tz) {
+                    netError = 'timezone required';
+                    syncNetwork();
+                    break;
+                }
+                netMutate(sendJSON('PUT', '/api/network/timezone',
+                    { timezone: netInputs.tz }), 'Timezone saved');
+                break;
+            case PACT_NTP_SAVE:
+                netMutate(sendJSON('PUT', '/api/network/ntp',
+                    { server: netInputs.ntp }),
+                    netInputs.ntp ? 'NTP server saved' : 'NTP disabled');
+                break;
+        }
+    }
+
+    function handleNetworkKey(event) {
+        if (accFocus < 3 || accFocus > 7) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const key = ['ip', 'mask', 'gw', 'tz', 'ntp'][accFocus - 3];
+        if (event.key === 'Enter') {
+            if (accFocus === 6) handleNetworkAction(PACT_TZ_SAVE, 0);
+            else if (accFocus === 7) handleNetworkAction(PACT_NTP_SAVE, 0);
+            else handleNetworkAction(PACT_NET_APPLY, 0);
+        } else if (event.key === 'Backspace') {
+            netInputs[key] = netInputs[key].slice(0, -1);
+            netArmed = false;
+            syncNetwork();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && netInputs[key].length < 64) {
+            netInputs[key] += event.key;
+            netArmed = false;
+            syncNetwork();
         } else {
             return;
         }
@@ -1237,6 +1395,7 @@
                 lastActivePage = page;
                 if (page === PAGE_ACCOUNTS) loadAccounts();
                 else if (page === PAGE_STORAGE) loadStorage();
+                else if (page === PAGE_NETWORK) loadNetwork();
             }
             const pageAction = instance.exports.TakePageAction();
             if (pageAction) handlePageAction(pageAction);
