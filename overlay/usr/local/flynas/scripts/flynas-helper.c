@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <pwd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #define MAX_NAME_LEN 32
@@ -21,6 +22,8 @@
 #define MAX_GROUPS_LEN 256
 #define MAX_KEYS_LEN 65536
 #define PW_CMD "/usr/sbin/pw"
+#define SMARTCTL_CMD "/usr/local/sbin/smartctl"
+#define FDISK_CMD "/sbin/fdisk"
 
 static const char *allowed_shells[] = {
     "/bin/sh",
@@ -65,6 +68,29 @@ static int valid_shell(const char *s)
             return 1;
     }
     return 0;
+}
+
+/* Validate disk name: ^[a-z]+[0-9]+$ (e.g. vbd0, da1, ad2) */
+static int valid_disk(const char *s)
+{
+    size_t i = 0, len;
+
+    if (!s || !*s)
+        return 0;
+    len = strlen(s);
+    if (len > 16)
+        return 0;
+
+    while (s[i] && islower((unsigned char)s[i]))
+        i++;
+    if (i == 0 || !s[i])
+        return 0;
+    while (s[i]) {
+        if (!isdigit((unsigned char)s[i]))
+            return 0;
+        i++;
+    }
+    return 1;
 }
 
 /* Validate comma-separated list of names */
@@ -336,6 +362,28 @@ int main(int argc, char *argv[])
         } else {
             die("sshkeys: unknown subcommand (use write or remove)");
         }
+
+    } else if (strcmp(cmd, "smart") == 0) {
+        /* Read-only SMART info+health; -d sat works around ahci bug #1412 */
+        if (argc != 3)
+            die("usage: flynas-helper smart <disk>");
+        if (!valid_disk(argv[2]))
+            die("invalid disk name");
+        char dev[64];
+        snprintf(dev, sizeof(dev), "/dev/%s", argv[2]);
+        char *args[] = { "smartctl", "-d", "sat", "-i", "-H", dev, NULL };
+        rc = run(SMARTCTL_CMD, args);
+
+    } else if (strcmp(cmd, "diskinfo") == 0) {
+        /* Read-only geometry summary (fdisk -s prints "N cyl M hd K sec") */
+        if (argc != 3)
+            die("usage: flynas-helper diskinfo <disk>");
+        if (!valid_disk(argv[2]))
+            die("invalid disk name");
+        char dev[64];
+        snprintf(dev, sizeof(dev), "/dev/%s", argv[2]);
+        char *args[] = { "fdisk", "-s", dev, NULL };
+        rc = run(FDISK_CMD, args);
 
     } else {
         die("unknown command");

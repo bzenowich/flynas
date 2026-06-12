@@ -4,6 +4,7 @@ local auth_api = require("api.auth")
 local users_api = require("api.users")
 local groups_api = require("api.groups")
 local settings_api = require("api.settings")
+local dashboard_api = require("api.dashboard")
 
 local uri = ngx.var.uri
 local method = ngx.req.get_method()
@@ -84,6 +85,31 @@ local routes = {
 
     ["POST:groups"] = function()
         groups_api.create(read_body())
+    end,
+
+    -- Dashboard
+    ["GET:dashboard/system"] = function()
+        dashboard_api.system()
+    end,
+
+    ["GET:dashboard/cpu"] = function()
+        dashboard_api.cpu()
+    end,
+
+    ["GET:dashboard/memory"] = function()
+        dashboard_api.memory()
+    end,
+
+    ["GET:dashboard/network"] = function()
+        dashboard_api.network()
+    end,
+
+    ["GET:dashboard/disks"] = function()
+        dashboard_api.disks()
+    end,
+
+    ["GET:dashboard/volumes"] = function()
+        dashboard_api.volumes()
     end,
 
     -- Settings
