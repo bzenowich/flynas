@@ -31,12 +31,11 @@ A NAS appliance built on DragonFlyBSD with HAMMER2, managed via a web UI.
 
 ### 1.1 Base System Setup
 
-- [ ] Install DragonFlyBSD with HAMMER2 root filesystem
-- [ ] Install packages: `openresty`, `qemu`, `rclone`, `git`
-- [ ] Build and install `lsqlite3` for LuaJIT (or install via luarocks)
-- [ ] Create `flynas` system user and group
-- [ ] Set up rc.d script for: `openresty`
-- [ ] Write `/usr/local/etc/rc.d/flynas` master rc.d script that starts all services in order
+- [ ] Install DragonFlyBSD with HAMMER2 root filesystem (dev VM `h2dev` runs UFS root + RAID6-patched HAMMER2 scratch disks)
+- [x] Install packages: `openresty`, `lua51-cjson`, `libargon2` (qemu/rclone/git deferred to later phases)
+- [x] SQLite access for LuaJIT — implemented as FFI binding (`util/db.lua`), no lsqlite3 dependency
+- [x] Create `flynas` system user and group
+- [x] Write `/usr/local/etc/rc.d/flynas` rc.d script (starts openresty with flynas prefix)
 
 ### 1.2 SQLite Schema
 
@@ -252,13 +251,20 @@ http {
 
 All endpoints under `/api/`. JSON request/response. Session cookie auth (first user created becomes admin during initial setup).
 
-### 2.1 Authentication
+### 2.1 Authentication — DONE (diverged: passwordless)
 
-- `POST /api/login` — username + password → set session cookie
-- `POST /api/setup` — initial admin account creation (only works once)
-- `GET /api/session` — check current session
-- `POST /api/logout` — clear session
-- Sessions stored in SQLite with expiry. Admin password hashed with bcrypt.
+Implemented as passwordless two-step auth instead of username+password:
+
+- `GET /api/setup/status` — public; tells UI whether to show setup wizard or sign-in
+- `POST /api/setup` — step 1: create admin user record, generate TOTP secret, return secret + otpauth URI + one-time setup token
+- `POST /api/setup/confirm` — step 2: verify TOTP code, create system account (random password via setuid helper), activate session
+- `POST /api/login` — step 1: identify user, pick auth method (TOTP if enrolled, else verified-email code), return one-time login token
+- `POST /api/login/verify` — step 2: verify TOTP/email code, set session cookie
+- `GET /api/session` / `POST /api/logout`
+
+Sessions in SQLite with expiry; pending (setup/login) sessions are
+one-time use with 10 min TTL. System password hashed with argon2
+(not bcrypt). Email codes sent via SMTP settings API.
 
 ### 2.2 Dashboard API
 
@@ -272,6 +278,8 @@ All endpoints under `/api/`. JSON request/response. Session cookie auth (first u
 | `/api/dashboard/volumes` | GET | HAMMER2 volume status, usage per PFS |
 
 Implementation: Each Lua handler calls shell commands via `io.popen()` or `ngx.pipe`, parses output, returns JSON.
+
+**Status: DONE** — all six endpoints implemented (`api/dashboard.lua`).
 
 ### 2.3 Network API
 
@@ -298,6 +306,8 @@ Implementation: Writes to `/etc/rc.conf` for network config. Runs `service netif
 | `/api/groups/:id/members` | PUT | Set group membership |
 
 Key generation: `ssh-keygen -t ed25519` for keypair. Encrypt private key with AES-128 passphrase via `openssl enc -aes-128-cbc`. Return encrypted private key as downloadable file.
+
+**Status: API mostly done** (`api/users.lua`, `api/groups.lua`) — users/groups CRUD, SSH keys, per-user TOTP setup/confirm/disable, email set/verify. Keypair generation endpoint not yet implemented. Also added (not in original plan): SMTP settings API (`GET/PUT /api/settings/smtp`, `POST /api/settings/smtp/test`) for email-code auth.
 
 ### 2.5 Storage API
 
@@ -454,13 +464,13 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Phase 3: Frontend (Clay UI)
 
-### 3.1 Build Setup
+### 3.1 Build Setup — DONE
 
 - Write UI in C using `clay.h` (single header, ~4KB)
-- Compile to WASM with `clang --target=wasm32`
+- Compile to WASM with `clang --target=wasm32` (`ui/build.sh`, cross-compiled on Linux)
 - Use Clay's HTML renderer for browser output
-- JS glue code: fetch API data, pass to WASM, render DOM updates
-- No JS framework dependencies
+- JS glue code: fetch API data, format strings, write into wasm string pool
+- No JS framework dependencies (one vendored MIT lib: `ui/qrcode.js` for TOTP QR)
 
 ### 3.2 UI Pages
 
@@ -484,6 +494,8 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 - WASM returns layout render commands, JS applies to DOM
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
+
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Remaining pages are placeholders.
 
 ---
 
@@ -546,22 +558,22 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Implementation Order
 
-| Step | What | Depends On |
-|---|---|---|
-| 1 | Base system + packages | — |
-| 2 | SQLite schema + db.lua helper | 1 |
-| 3 | OpenResty skeleton + auth | 2 |
-| 4 | Dashboard API (system stats) | 3 |
-| 5 | Clay UI scaffold + dashboard page | 4 |
-| 6 | Network API + UI | 3 |
-| 7 | Accounts API + UI | 3 |
-| 8 | Storage API + UI (HAMMER2 multi-volume) | 3 |
-| 9 | Backup API + UI (snapshots, CryFS, S3) | 8 |
-| 10 | VM API + UI (QEMU/NVMM) | 8 |
-| 11 | App templates + one-click install | 10 |
-| 12 | Monitoring system + UI | 3 |
-| 13 | Installer script | All |
-| 14 | Testing & hardening | All |
+| Step | What | Depends On | Status |
+|---|---|---|---|
+| 1 | Base system + packages | — | ✅ done (h2dev dev VM) |
+| 2 | SQLite schema + db.lua helper | 1 | ✅ done (FFI binding) |
+| 3 | OpenResty skeleton + auth | 2 | ✅ done (passwordless TOTP/email) |
+| 4 | Dashboard API (system stats) | 3 | ✅ done |
+| 5 | Clay UI scaffold + dashboard page | 4 | ✅ done (incl. login/setup flow + QR) |
+| 6 | Network API + UI | 3 | — |
+| 7 | Accounts API + UI | 3 | ◐ API mostly done, no UI |
+| 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | — |
+| 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | — |
+| 10 | VM API + UI (QEMU/NVMM) | 8 | — |
+| 11 | App templates + one-click install | 10 | — |
+| 12 | Monitoring system + UI | 3 | — |
+| 13 | Installer script | All | ◐ install.sh exists, needs rework for current layout |
+| 14 | Testing & hardening | All | — |
 
 ---
 
@@ -570,6 +582,13 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 1. **HAMMER2 multi-disk**: Use HAMMER2's native multi-volume support (`hammer2 volume-add` / `hammer2 volume-del`). No LVM or software RAID layer.
 2. **Encrypted backup**: Use `cryfs-batch` (separate project, see `cryfs-batch/SPEC.md`). Implements CryFS security model without FUSE.
 3. **Clay WASM toolchain**: Cross-compile on Linux. Deploy built artifacts (`.wasm` + `.js`) to DragonFlyBSD. No WASM toolchain needed on the NAS.
+4. **Passwordless auth**: No user-chosen passwords. Initial setup enrolls admin TOTP (QR + manual secret); login verifies TOTP or emailed one-time code. System accounts get random argon2-hashed passwords, created via a setuid helper (`scripts/flynas-helper.c`) so nginx workers never run privileged commands.
+5. **Privilege separation**: nginx runs `user www flynas`; DB is 664 www:flynas and `/usr/local/flynas` must stay www-writable for SQLite WAL files (deploy with `tar -xof`, see memory notes).
+
+## Progress Log
+
+- **2026-06-11**: Login/setup flow in Clay UI — auth screens in C, state machine + keyboard input in JS, public `GET /api/setup/status`, TOTP QR code on setup screen (vendored qrcode-generator). Fixed `is_setup_done` error swallowing. Verified end-to-end in headless Chrome against h2dev (login → TOTP → dashboard; QR decodes to correct otpauth URI).
+- **Earlier**: VM bootstrap (openresty, argon2, setuid helper), session auth → passwordless conversion, dashboard API + Clay dashboard page.
 
 ## Open Questions
 
