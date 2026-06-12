@@ -35,5 +35,6 @@ clang \
     "$ROOT/main.c"
 
 cp "$ROOT/index.html" "$STATIC/index.html"
+cp "$ROOT/qrcode.js" "$STATIC/qrcode.js"
 
 echo "built: $STATIC/clay.wasm ($(stat -c %s "$STATIC/clay.wasm") bytes)"

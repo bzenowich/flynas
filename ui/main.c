@@ -55,7 +55,9 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 // Dashboard state, populated from JS via the exported setters below
 // ---------------------------------------------------------------
 #define MAX_ROWS 16
-#define STRING_POOL_SIZE 16384
+// 0..12287 dashboard (reset each poll), 12288..16383 auth strings,
+// 16384..32767 QR code data URL — keep in sync with index.html
+#define STRING_POOL_SIZE 32768
 
 typedef struct {
     Clay_String name;
@@ -179,6 +181,9 @@ static int screen = SCREEN_LOADING;
 static Clay_String authInput = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
 static Clay_String authError = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
 static Clay_String authInfo  = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
+// PNG data URL for the TOTP QR code; HTML renderer reads this
+// Clay_String through Clay_ImageElementConfig.imageData
+static Clay_String qrImage   = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
 static int pendingAction = ACTION_NONE;
 
 CLAY_WASM_EXPORT("SetScreen") void SetScreen(int s) {
@@ -195,6 +200,10 @@ CLAY_WASM_EXPORT("SetAuthError") void SetAuthError(uint32_t off, uint32_t len) {
 
 CLAY_WASM_EXPORT("SetAuthInfo") void SetAuthInfo(uint32_t off, uint32_t len) {
     authInfo = poolString(off, len);
+}
+
+CLAY_WASM_EXPORT("SetAuthQr") void SetAuthQr(uint32_t off, uint32_t len) {
+    qrImage = poolString(off, len);
 }
 
 CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
@@ -518,7 +527,7 @@ void AuthPage(void) {
                 break;
             case SCREEN_SETUP_TOTP:
                 title       = CLAY_STRING("Set up two-factor auth");
-                prompt      = CLAY_STRING("Add this secret to your authenticator app, then enter the 6-digit code it shows.");
+                prompt      = CLAY_STRING("Scan the QR code with your authenticator app (or enter the secret manually), then type the 6-digit code it shows.");
                 placeholder = CLAY_STRING("123456");
                 submitLabel = CLAY_STRING("Verify");
                 hasBack = true;
@@ -543,6 +552,20 @@ void AuthPage(void) {
                 .fontId = FONT_ID_BODY, .fontSize = 24, .textColor = COLOR_TEXT }));
             CLAY_TEXT(prompt, CLAY_TEXT_CONFIG({
                 .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+
+            if (screen == SCREEN_SETUP_TOTP && qrImage.length > 0) {
+                CLAY(CLAY_ID("AuthQrWrap"), { .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER },
+                } }) {
+                    CLAY(CLAY_ID("AuthQr"), {
+                        .layout = { .sizing = {
+                            .width = CLAY_SIZING_FIXED(200),
+                            .height = CLAY_SIZING_FIXED(200) } },
+                        .image = { .imageData = &qrImage },
+                    }) {}
+                }
+            }
 
             // Context from JS: TOTP secret during setup, email hint during login
             if (authInfo.length > 0) {

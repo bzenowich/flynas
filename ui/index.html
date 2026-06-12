@@ -30,6 +30,8 @@
         }
     </style>
 </head>
+<!-- QR Code Generator by Kazuhiko Arase, MIT (vendored, see ui/qrcode.js) -->
+<script src="/qrcode.js"></script>
 <script type="module">
     // ----------------------------------------------------------------
     // Clay HTML renderer glue, adapted from the official Clay web
@@ -277,10 +279,13 @@
     const SCREEN_LOADING = 0, SCREEN_SETUP_USERNAME = 1, SCREEN_SETUP_TOTP = 2,
           SCREEN_LOGIN_USERNAME = 3, SCREEN_LOGIN_CODE = 4, SCREEN_MAIN = 5;
     const ACTION_SUBMIT = 1, ACTION_BACK = 2;
-    // Top of the 16KB string pool is reserved for auth strings so the
-    // dashboard's poolReset()/poolWrite() (offset 0 upward) never
-    // clobbers them.
+    // String pool regions (see STRING_POOL_SIZE in main.c): dashboard
+    // poolReset()/poolWrite() uses offset 0 upward, auth strings live
+    // at 12288, the QR data URL at 16384 — so they never clobber
+    // each other.
     const AUTH_POOL_BASE = 12288;
+    const QR_POOL_BASE = 16384;
+    const QR_POOL_SIZE = 16384;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -314,7 +319,42 @@
         authInputText = '';
         authErrorText = '';
         authInfoText = info || '';
+        instance.exports.SetAuthQr(0, 0);
         syncAuth();
+    }
+
+    function makeQrDataUrl(text) {
+        const qr = qrcode(0, 'M'); // version auto, ECC level M
+        qr.addData(text);
+        qr.make();
+        const n = qr.getModuleCount();
+        const scale = 6, quiet = 4;
+        const size = (n + quiet * 2) * scale;
+        const c = document.createElement('canvas');
+        c.width = c.height = size;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, size, size);
+        ctx.fillStyle = '#000';
+        for (let row = 0; row < n; row++) {
+            for (let col = 0; col < n; col++) {
+                if (qr.isDark(row, col)) {
+                    ctx.fillRect((col + quiet) * scale, (row + quiet) * scale, scale, scale);
+                }
+            }
+        }
+        return c.toDataURL('image/png');
+    }
+
+    function setAuthQr(totpUri) {
+        try {
+            const bytes = textEncoder.encode(makeQrDataUrl(totpUri));
+            if (bytes.length > QR_POOL_SIZE) return; // manual secret entry still works
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + QR_POOL_BASE, bytes.length).set(bytes);
+            instance.exports.SetAuthQr(QR_POOL_BASE, bytes.length);
+        } catch (err) {
+            console.log('QR generation failed:', err);
+        }
     }
 
     function enterMain() {
@@ -349,6 +389,7 @@
                 if (ok) {
                     setupToken = data.setup_token;
                     setAuthScreen(SCREEN_SETUP_TOTP, data.totp_secret);
+                    setAuthQr(data.totp_uri);
                 } else {
                     authErrorText = data.error || 'setup failed';
                 }
