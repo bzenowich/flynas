@@ -140,6 +140,7 @@ local pattern_routes = {
     { "GET",    "^users/(%d+)/ssh%-keys$",       function(id) users_api.list_ssh_keys(tonumber(id)) end },
     { "POST",   "^users/(%d+)/ssh%-keys$",       function(id) users_api.add_ssh_key(tonumber(id), read_body()) end },
     { "DELETE", "^users/(%d+)/ssh%-keys/(%d+)$", function(uid, kid) users_api.delete_ssh_key(tonumber(uid), tonumber(kid)) end },
+    { "POST",   "^users/(%d+)/keypair$",         function(id) users_api.keypair(tonumber(id), read_body()) end },
     { "POST",   "^users/(%d+)/totp/setup$",      function(id) users_api.totp_setup(tonumber(id)) end },
     { "POST",   "^users/(%d+)/totp/confirm$",    function(id) users_api.totp_confirm(tonumber(id), read_body()) end },
     { "DELETE", "^users/(%d+)/totp$",            function(id) users_api.totp_disable(tonumber(id)) end },

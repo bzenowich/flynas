@@ -203,8 +203,17 @@ function _M.delete(user_id)
         ngx.log(ngx.ERR, "userdel failed: ", exec_err)
     end
 
-    conn:query("DELETE FROM users WHERE id = ?", user_id)
+    -- user_groups has no ON DELETE CASCADE; clear it first or the
+    -- user delete fails the foreign key check
+    conn:query("DELETE FROM user_groups WHERE user_id = ?", user_id)
+    local _, db_err = conn:query("DELETE FROM users WHERE id = ?", user_id)
     conn:close()
+
+    if db_err then
+        ngx.log(ngx.ERR, "user delete failed: ", db_err)
+        json.response({ error = "failed to delete user" }, 500)
+        return
+    end
 
     json.response({ status = "ok" })
 end
@@ -308,6 +317,108 @@ function _M.delete_ssh_key(user_id, key_id)
     conn:close()
 
     json.response({ status = "ok" })
+end
+
+-- Run a shell command, return output and success flag
+local function capture(cmd)
+    local pipe = io.popen(cmd .. " 2>&1", "r")
+    if not pipe then
+        return nil, false
+    end
+    local output = pipe:read("*a")
+    local ok = pipe:close()
+    return output, ok and true or false
+end
+
+-- Shell single-quote escaping for untrusted strings
+local function shquote(s)
+    return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+-- POST /api/users/:id/keypair
+-- Generates an ed25519 keypair. The public key is stored and synced
+-- to authorized_keys; the private key is returned AES-128 encrypted
+-- with the caller's passphrase and never touches the database.
+function _M.keypair(user_id, body)
+    if not body or not body.passphrase or #body.passphrase < 8 then
+        json.response({ error = "passphrase of at least 8 characters required" }, 400)
+        return
+    end
+
+    local conn, err = db.open(DB_PATH)
+    if not conn then
+        json.response({ error = "internal error" }, 500)
+        return
+    end
+
+    local user = conn:query_one("SELECT username FROM users WHERE id = ?", user_id)
+    if not user then
+        conn:close()
+        json.response({ error = "user not found" }, 404)
+        return
+    end
+
+    -- Random temp path so concurrent requests can't collide
+    local f = io.open("/dev/urandom", "rb")
+    local rnd = f:read(8)
+    f:close()
+    local hex = rnd:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+    local base = "/tmp/flynas-keygen-" .. hex
+
+    local out, ok = capture(
+        "/usr/bin/ssh-keygen -q -t ed25519 -N '' -C " ..
+        shquote(user.username .. "@flynas") .. " -f " .. base .. " </dev/null"
+    )
+    if not ok then
+        conn:close()
+        os.remove(base)
+        os.remove(base .. ".pub")
+        ngx.log(ngx.ERR, "ssh-keygen failed: ", out or "?")
+        json.response({ error = "key generation failed" }, 500)
+        return
+    end
+
+    local pubf = io.open(base .. ".pub", "r")
+    local public_key = pubf and pubf:read("*a") or nil
+    if pubf then pubf:close() end
+
+    -- Encrypt the private key; passphrase goes via stdin, never argv
+    local enc, enc_ok = capture(
+        "printf '%s' " .. shquote(body.passphrase) ..
+        " | /usr/bin/openssl enc -aes-128-cbc -pbkdf2 -salt -base64" ..
+        " -pass stdin -in " .. base
+    )
+
+    os.remove(base)
+    os.remove(base .. ".pub")
+
+    if not public_key or not enc_ok then
+        conn:close()
+        ngx.log(ngx.ERR, "key encryption failed: ", enc or "?")
+        json.response({ error = "key encryption failed" }, 500)
+        return
+    end
+
+    public_key = public_key:gsub("%s+$", "")
+
+    local label = (body.label and #body.label > 0) and body.label
+        or ("generated " .. os.date("!%Y-%m-%d"))
+    local rows = conn:query(
+        "INSERT INTO ssh_keys (user_id, label, public_key) VALUES (?, ?, ?) " ..
+        "RETURNING id",
+        user_id, label, public_key
+    )
+    sync_ssh_keys(conn, user_id, user.username)
+    conn:close()
+
+    json.response({
+        key_id = rows and rows[1] and rows[1].id or nil,
+        public_key = public_key,
+        private_key_encrypted = enc,
+        cipher = "aes-128-cbc",
+        kdf = "pbkdf2",
+        decrypt_hint = "openssl enc -d -aes-128-cbc -pbkdf2 -base64 -in <file>",
+    }, 201)
 end
 
 -- POST /api/users/:id/totp/setup

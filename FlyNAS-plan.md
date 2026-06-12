@@ -307,7 +307,7 @@ Implementation: Writes to `/etc/rc.conf` for network config. Runs `service netif
 
 Key generation: `ssh-keygen -t ed25519` for keypair. Encrypt private key with AES-128 passphrase via `openssl enc -aes-128-cbc`. Return encrypted private key as downloadable file.
 
-**Status: API mostly done** (`api/users.lua`, `api/groups.lua`) — users/groups CRUD, SSH keys, per-user TOTP setup/confirm/disable, email set/verify. Keypair generation endpoint not yet implemented. Also added (not in original plan): SMTP settings API (`GET/PUT /api/settings/smtp`, `POST /api/settings/smtp/test`) for email-code auth.
+**Status: DONE** (`api/users.lua`, `api/groups.lua`) — users/groups CRUD, SSH keys, per-user TOTP setup/confirm/disable, email set/verify, keypair generation (`POST /api/users/:id/keypair`: ed25519 via ssh-keygen, private key returned AES-128-CBC/PBKDF2 encrypted, public key auto-added to authorized_keys). Also added (not in original plan): SMTP settings API (`GET/PUT /api/settings/smtp`, `POST /api/settings/smtp/test`) for email-code auth.
 
 ### 2.5 Storage API
 
@@ -495,7 +495,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Remaining pages are placeholders.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Remaining pages are placeholders.
 
 ---
 
@@ -566,7 +566,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 | 4 | Dashboard API (system stats) | 3 | ✅ done |
 | 5 | Clay UI scaffold + dashboard page | 4 | ✅ done (incl. login/setup flow + QR) |
 | 6 | Network API + UI | 3 | — |
-| 7 | Accounts API + UI | 3 | ◐ API mostly done, no UI |
+| 7 | Accounts API + UI | 3 | ✅ done |
 | 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | — |
 | 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | — |
 | 10 | VM API + UI (QEMU/NVMM) | 8 | — |

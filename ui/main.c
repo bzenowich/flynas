@@ -56,8 +56,9 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 // ---------------------------------------------------------------
 #define MAX_ROWS 16
 // 0..12287 dashboard (reset each poll), 12288..16383 auth strings,
-// 16384..32767 QR code data URL — keep in sync with index.html
-#define STRING_POOL_SIZE 32768
+// 16384..32767 QR code data URL, 32768..49151 accounts page —
+// keep in sync with index.html
+#define STRING_POOL_SIZE 49152
 
 typedef struct {
     Clay_String name;
@@ -213,6 +214,149 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 }
 
 // ---------------------------------------------------------------
+// Accounts page state, populated from JS like the dashboard.
+// Button presses are queued as packed page actions: low 4 bits =
+// action code, remaining bits = row id. JS drains the queue each
+// frame via TakePageAction() and performs the API call.
+// ---------------------------------------------------------------
+#define PACT_NONE            0
+#define PACT_USER_SUBMIT     1
+#define PACT_USER_DELETE     2
+#define PACT_USER_TOGGLE_SSH 3
+#define PACT_USER_KEYGEN     4
+#define PACT_GROUP_SUBMIT    5
+#define PACT_GROUP_DELETE    6
+#define PACT_GROUP_SELECT    7
+#define PACT_MEMBER_TOGGLE   8
+#define PACT_FOCUS           9
+#define PACT_PACK(action, arg) ((action) | ((arg) << 4))
+
+typedef struct {
+    int id;
+    Clay_String username;
+    Clay_String email;
+    bool totp, ssh, admin, member;
+} UserRow;
+
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String count;
+} GroupRow;
+
+static UserRow accUsers[MAX_ROWS];
+static int accUserCount = 0;
+static GroupRow accGroups[MAX_ROWS];
+static int accGroupCount = 0;
+static Clay_String accUserInput;
+static Clay_String accGroupInput;
+static Clay_String accError;
+static int accFocus = -1;        // 0 = user input, 1 = group input
+static int accSelectedGroup = 0; // group id, 0 = none; set by JS once members are loaded
+static int accPendingDeleteUser = 0;
+static int accPendingDeleteGroup = 0;
+static int pendingPageAction = PACT_NONE;
+
+CLAY_WASM_EXPORT("ClearUsers") void ClearUsers(void) {
+    accUserCount = 0;
+    accPendingDeleteUser = 0;
+}
+
+CLAY_WASM_EXPORT("AddUser")
+void AddUser(int id,
+             uint32_t nameOff, uint32_t nameLen,
+             uint32_t emailOff, uint32_t emailLen,
+             bool totp, bool ssh, bool admin, bool member) {
+    if (accUserCount >= MAX_ROWS) return;
+    accUsers[accUserCount++] = (UserRow) {
+        .id = id,
+        .username = poolString(nameOff, nameLen),
+        .email = poolString(emailOff, emailLen),
+        .totp = totp, .ssh = ssh, .admin = admin, .member = member,
+    };
+}
+
+CLAY_WASM_EXPORT("ClearGroups") void ClearGroups(void) {
+    accGroupCount = 0;
+    accPendingDeleteGroup = 0;
+}
+
+CLAY_WASM_EXPORT("AddGroup")
+void AddGroup(int id, uint32_t nameOff, uint32_t nameLen,
+              uint32_t countOff, uint32_t countLen) {
+    if (accGroupCount >= MAX_ROWS) return;
+    accGroups[accGroupCount++] = (GroupRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .count = poolString(countOff, countLen),
+    };
+}
+
+CLAY_WASM_EXPORT("SetAccountsInputs")
+void SetAccountsInputs(uint32_t userOff, uint32_t userLen,
+                       uint32_t groupOff, uint32_t groupLen) {
+    accUserInput = poolString(userOff, userLen);
+    accGroupInput = poolString(groupOff, groupLen);
+}
+
+CLAY_WASM_EXPORT("SetAccountsError") void SetAccountsError(uint32_t off, uint32_t len) {
+    accError = poolString(off, len);
+}
+
+CLAY_WASM_EXPORT("SetSelectedGroup") void SetSelectedGroup(int gid) {
+    accSelectedGroup = gid;
+}
+
+// JS pushes focus changes it makes itself (e.g. Escape to unfocus)
+CLAY_WASM_EXPORT("SetAccountsFocus") void SetAccountsFocus(int f) {
+    accFocus = f;
+}
+
+CLAY_WASM_EXPORT("TakePageAction") int TakePageAction(void) {
+    int a = pendingPageAction;
+    pendingPageAction = PACT_NONE;
+    return a;
+}
+
+void HandlePageButton(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        pendingPageAction = (int)(intptr_t)userData;
+    }
+}
+
+// Destructive buttons arm on first press, fire on the second
+void HandleUserDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int uid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (accPendingDeleteUser == uid) {
+            pendingPageAction = PACT_PACK(PACT_USER_DELETE, uid);
+            accPendingDeleteUser = 0;
+        } else {
+            accPendingDeleteUser = uid;
+        }
+    }
+}
+
+void HandleGroupDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int gid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (accPendingDeleteGroup == gid) {
+            pendingPageAction = PACT_PACK(PACT_GROUP_DELETE, gid);
+            accPendingDeleteGroup = 0;
+        } else {
+            accPendingDeleteGroup = gid;
+        }
+    }
+}
+
+void HandleFocus(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        accFocus = (int)(intptr_t)userData;
+        pendingPageAction = PACT_PACK(PACT_FOCUS, accFocus);
+    }
+}
+
+// ---------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------
 static Clay_String NAV_ITEMS[] = {
@@ -229,6 +373,11 @@ static Clay_String NAV_ITEMS[] = {
 #define NAV_COUNT (sizeof(NAV_ITEMS) / sizeof(NAV_ITEMS[0]))
 
 static int activePage = 0;
+
+// Polled by JS each frame to start/stop per-page data loading
+CLAY_WASM_EXPORT("GetActivePage") int GetActivePage(void) {
+    return activePage;
+}
 
 void HandleNavInteraction(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
     if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
@@ -416,6 +565,213 @@ void DashboardPage(void) {
         .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
         VolumesCard();
         DisksCard();
+    }
+}
+
+// ---------------------------------------------------------------
+// Accounts page widgets
+// ---------------------------------------------------------------
+void SmallButton(Clay_ElementId id, Clay_String label, Clay_Color color,
+                 void (*handler)(Clay_ElementId, Clay_PointerData, void *),
+                 void *userData) {
+    CLAY(id, {
+        .layout = {
+            .padding = { 10, 10, 4, 4 },
+            .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = Clay_Hovered() ? COLOR_NAV_HOVER : COLOR_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(4),
+        .border = { .color = color, .width = { 1, 1, 1, 1 } },
+        .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+    }) {
+        Clay_OnHover(handler, userData);
+        CLAY_TEXT(label, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = color,
+            .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+        }));
+    }
+}
+
+void TextInputBox(Clay_ElementId id, Clay_String value, Clay_String placeholder, int focusIndex) {
+    bool focused = (accFocus == focusIndex);
+    CLAY(id, {
+        .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(36) },
+            .padding = { 10, 10, 0, 0 },
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            .childGap = 2,
+        },
+        .backgroundColor = COLOR_BG,
+        .cornerRadius = CLAY_CORNER_RADIUS(6),
+        .border = { .color = focused ? COLOR_ACCENT : COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+        .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+    }) {
+        Clay_OnHover(HandleFocus, (void *)(intptr_t)focusIndex);
+        if (value.length == 0) {
+            CLAY_TEXT(placeholder, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED,
+                .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+            }));
+        } else {
+            CLAY_TEXT(value, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_MONO, .fontSize = 16, .textColor = COLOR_TEXT,
+                .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+            }));
+        }
+        if (focused) {
+            CLAY(CLAY_IDI("InputCaret", focusIndex), { .layout = {
+                .sizing = { .width = CLAY_SIZING_FIXED(2), .height = CLAY_SIZING_FIXED(18) } },
+                .backgroundColor = COLOR_ACCENT,
+            }) {}
+        }
+    }
+}
+
+void UsersCard(void) {
+    CARD("UsersCard") {
+        CardTitle(CLAY_STRING("Users"));
+        if (accUserCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No users"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < accUserCount; i++) {
+            UserRow *u = &accUsers[i];
+            CLAY(CLAY_IDI("UserRow", u->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 10,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY_TEXT(u->username, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 16, .textColor = COLOR_TEXT }));
+                if (u->admin) {
+                    CLAY_TEXT(CLAY_STRING("admin"), CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_ACCENT }));
+                }
+                if (u->totp) {
+                    CLAY_TEXT(CLAY_STRING("2FA"), CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_GOOD }));
+                }
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                CLAY_TEXT(u->email, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+                SmallButton(CLAY_IDI("UserSsh", u->id),
+                    u->ssh ? CLAY_STRING("SSH on") : CLAY_STRING("SSH off"),
+                    u->ssh ? COLOR_GOOD : COLOR_MUTED,
+                    HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_USER_TOGGLE_SSH, u->id));
+                SmallButton(CLAY_IDI("UserKey", u->id), CLAY_STRING("Keygen"), COLOR_ACCENT,
+                    HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_USER_KEYGEN, u->id));
+                SmallButton(CLAY_IDI("UserDel", u->id),
+                    accPendingDeleteUser == u->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                    COLOR_BAD, HandleUserDelete, (void *)(intptr_t)u->id);
+            }
+        }
+        CLAY(CLAY_ID("UserAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            TextInputBox(CLAY_ID("UserInput"), accUserInput, CLAY_STRING("new username"), 0);
+            SmallButton(CLAY_ID("UserAddBtn"), CLAY_STRING("Add User"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_USER_SUBMIT, 0));
+        }
+    }
+}
+
+void GroupsCard(void) {
+    CLAY(CLAY_ID("GroupsCard"), {
+        .layout = {
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .sizing = { .width = CLAY_SIZING_FIXED(360) },
+            .padding = CLAY_PADDING_ALL(20),
+            .childGap = 12,
+        },
+        .backgroundColor = COLOR_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+    }) {
+        CardTitle(CLAY_STRING("Groups"));
+        if (accGroupCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No groups"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < accGroupCount; i++) {
+            GroupRow *g = &accGroups[i];
+            bool open = (accSelectedGroup == g->id);
+            CLAY(CLAY_IDI("GroupRow", g->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 10,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY(CLAY_IDI("GroupName", g->id), {
+                    .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } },
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                }) {
+                    Clay_OnHover(HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_GROUP_SELECT, g->id));
+                    CLAY_TEXT(g->name, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 16,
+                        .textColor = open ? COLOR_ACCENT : COLOR_TEXT,
+                        .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                    }));
+                }
+                CLAY_TEXT(g->count, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+                SmallButton(CLAY_IDI("GroupDel", g->id),
+                    accPendingDeleteGroup == g->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                    COLOR_BAD, HandleGroupDelete, (void *)(intptr_t)g->id);
+            }
+            if (open) {
+                CLAY(CLAY_IDI("GroupMembers", g->id), { .layout = {
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .padding = { 16, 0, 2, 6 },
+                    .childGap = 4,
+                } }) {
+                    for (int j = 0; j < accUserCount; j++) {
+                        UserRow *u = &accUsers[j];
+                        CLAY(CLAY_IDI("Member", u->id), {
+                            .layout = {
+                                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                                .childGap = 8,
+                            },
+                            .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                        }) {
+                            Clay_OnHover(HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_MEMBER_TOGGLE, u->id));
+                            CLAY_TEXT(u->member ? CLAY_STRING("[x]") : CLAY_STRING("[ ]"),
+                                CLAY_TEXT_CONFIG({
+                                    .fontId = FONT_ID_MONO, .fontSize = 15,
+                                    .textColor = u->member ? COLOR_ACCENT : COLOR_MUTED,
+                                    .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                                }));
+                            CLAY_TEXT(u->username, CLAY_TEXT_CONFIG({
+                                .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT,
+                                .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        CLAY(CLAY_ID("GroupAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            TextInputBox(CLAY_ID("GroupInput"), accGroupInput, CLAY_STRING("new group"), 1);
+            SmallButton(CLAY_ID("GroupAddBtn"), CLAY_STRING("Add Group"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_GROUP_SUBMIT, 0));
+        }
+    }
+}
+
+void AccountsPage(void) {
+    CLAY(CLAY_ID("AccountsRow"), { .layout = {
+        .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
+        UsersCard();
+        GroupsCard();
+    }
+    if (accError.length > 0) {
+        CLAY_TEXT(accError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
     }
 }
 
@@ -651,6 +1007,8 @@ Clay_RenderCommandArray CreateLayout(float deltaTime) {
             }) {
                 if (activePage == 0) {
                     DashboardPage();
+                } else if (activePage == 3) {
+                    AccountsPage();
                 } else {
                     PlaceholderPage();
                 }

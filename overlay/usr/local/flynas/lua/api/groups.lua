@@ -157,8 +157,16 @@ function _M.delete(group_id)
         ngx.log(ngx.ERR, "groupdel failed: ", exec_err)
     end
 
-    conn:query("DELETE FROM groups WHERE id = ?", group_id)
+    -- user_groups has no ON DELETE CASCADE; clear memberships first
+    conn:query("DELETE FROM user_groups WHERE group_id = ?", group_id)
+    local _, db_err = conn:query("DELETE FROM groups WHERE id = ?", group_id)
     conn:close()
+
+    if db_err then
+        ngx.log(ngx.ERR, "group delete failed: ", db_err)
+        json.response({ error = "failed to delete group" }, 500)
+        return
+    end
 
     json.response({ status = "ok" })
 end

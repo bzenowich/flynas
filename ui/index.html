@@ -286,6 +286,7 @@
     const AUTH_POOL_BASE = 12288;
     const QR_POOL_BASE = 16384;
     const QR_POOL_SIZE = 16384;
+    const ACCOUNTS_POOL_BASE = 32768;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -366,17 +367,19 @@
         if (!dashboardTimer) dashboardTimer = setInterval(refreshDashboard, 5000);
     }
 
-    async function postJSON(url, body) {
+    async function sendJSON(method, url, body) {
         const resp = await fetch(url, {
-            method: 'POST',
+            method,
             credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body || {}),
+            body: body === undefined ? undefined : JSON.stringify(body || {}),
         });
         let data = {};
         try { data = await resp.json(); } catch (e) {}
-        return { ok: resp.ok, data };
+        return { ok: resp.ok, status: resp.status, data };
     }
+
+    const postJSON = (url, body) => sendJSON('POST', url, body || {});
 
     async function submitAuth() {
         if (authBusy || authInputText.length === 0) return;
@@ -444,7 +447,13 @@
     }
 
     function handleAuthKey(event) {
-        if (authScreen === SCREEN_MAIN || authScreen === SCREEN_LOADING) return;
+        if (authScreen === SCREEN_MAIN) {
+            if (instance.exports.GetActivePage() === PAGE_ACCOUNTS) {
+                handleAccountsKey(event);
+            }
+            return;
+        }
+        if (authScreen === SCREEN_LOADING) return;
         if (event.ctrlKey || event.metaKey || event.altKey) return;
         if (event.key === 'Enter') {
             submitAuth();
@@ -476,6 +485,190 @@
             authErrorText = 'API unreachable: ' + err;
             syncAuth();
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Accounts page: C renders rows and queues packed actions (low 4
+    // bits = action, rest = row id); we drain them each frame, call
+    // the REST API and push fresh data back into the string pool.
+    // ----------------------------------------------------------------
+    const PAGE_ACCOUNTS = 3;
+    const PACT_USER_SUBMIT = 1, PACT_USER_DELETE = 2, PACT_USER_TOGGLE_SSH = 3,
+          PACT_USER_KEYGEN = 4, PACT_GROUP_SUBMIT = 5, PACT_GROUP_DELETE = 6,
+          PACT_GROUP_SELECT = 7, PACT_MEMBER_TOGGLE = 8, PACT_FOCUS = 9;
+
+    let accUsers = [], accGroups = [];
+    let accSelectedGroup = 0;
+    let accMembers = new Set();
+    let accInputs = ['', ''];   // 0 = new user, 1 = new group
+    let accFocus = -1;
+    let accError = '';
+    let lastActivePage = -1;
+
+    function syncAccounts() {
+        let off = ACCOUNTS_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 128));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearUsers();
+        for (const u of accUsers) {
+            const name = write(u.username);
+            const email = write(u.email || '');
+            instance.exports.AddUser(u.id, name.off, name.len, email.off, email.len,
+                u.totp_enabled ? 1 : 0, u.ssh_enabled ? 1 : 0, u.is_admin ? 1 : 0,
+                accMembers.has(u.id) ? 1 : 0);
+        }
+        instance.exports.ClearGroups();
+        for (const g of accGroups) {
+            const name = write(g.name);
+            const count = write(g.member_count + (g.member_count === 1 ? ' member' : ' members'));
+            instance.exports.AddGroup(g.id, name.off, name.len, count.off, count.len);
+        }
+        const inU = write(accInputs[0]);
+        const inG = write(accInputs[1]);
+        instance.exports.SetAccountsInputs(inU.off, inU.len, inG.off, inG.len);
+        const err = write(accError);
+        instance.exports.SetAccountsError(err.off, err.len);
+        instance.exports.SetSelectedGroup(accSelectedGroup);
+    }
+
+    async function loadAccounts() {
+        try {
+            const [users, groups] = await Promise.all([
+                getJSON('/api/users'), getJSON('/api/groups')]);
+            accUsers = Array.isArray(users) ? users : [];
+            accGroups = Array.isArray(groups) ? groups : [];
+            if (accSelectedGroup && !accGroups.some(g => g.id === accSelectedGroup)) {
+                accSelectedGroup = 0;
+                accMembers = new Set();
+            }
+        } catch (err) {
+            accError = 'load failed: ' + err;
+        }
+        syncAccounts();
+    }
+
+    async function accountsMutate(promise) {
+        accError = '';
+        const { ok, data } = await promise;
+        if (!ok) accError = data.error || 'request failed';
+        await loadAccounts();
+    }
+
+    async function selectGroup(gid) {
+        if (accSelectedGroup === gid) {
+            accSelectedGroup = 0;
+            accMembers = new Set();
+            syncAccounts();
+            return;
+        }
+        try {
+            const detail = await getJSON('/api/groups/' + gid);
+            const members = Array.isArray(detail.members) ? detail.members : [];
+            accMembers = new Set(members.map(m => m.id));
+            accSelectedGroup = gid;
+        } catch (err) {
+            accError = 'group load failed: ' + err;
+        }
+        syncAccounts();
+    }
+
+    async function keygenUser(uid) {
+        const user = accUsers.find(u => u.id === uid);
+        if (!user) return;
+        const passphrase = window.prompt(
+            'Passphrase to encrypt the private key for "' + user.username + '" (min 8 chars):');
+        if (!passphrase) return;
+        const { ok, data } = await postJSON('/api/users/' + uid + '/keypair', { passphrase });
+        if (!ok) {
+            accError = data.error || 'keygen failed';
+            syncAccounts();
+            return;
+        }
+        const blob = new Blob([data.private_key_encrypted], { type: 'application/octet-stream' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'flynas-' + user.username + '-id_ed25519.enc';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        loadAccounts();
+    }
+
+    function handlePageAction(packed) {
+        const action = packed & 15, arg = packed >> 4;
+        switch (action) {
+            case PACT_FOCUS:
+                accFocus = arg;
+                break;
+            case PACT_USER_SUBMIT:
+                if (accInputs[0]) {
+                    const username = accInputs[0];
+                    accInputs[0] = '';
+                    accountsMutate(postJSON('/api/users', { username }));
+                }
+                break;
+            case PACT_USER_DELETE:
+                accountsMutate(sendJSON('DELETE', '/api/users/' + arg));
+                break;
+            case PACT_USER_TOGGLE_SSH: {
+                const u = accUsers.find(x => x.id === arg);
+                if (u) accountsMutate(sendJSON('PUT', '/api/users/' + arg,
+                    { ssh_enabled: !u.ssh_enabled }));
+                break;
+            }
+            case PACT_USER_KEYGEN:
+                keygenUser(arg);
+                break;
+            case PACT_GROUP_SUBMIT:
+                if (accInputs[1]) {
+                    const name = accInputs[1];
+                    accInputs[1] = '';
+                    accountsMutate(postJSON('/api/groups', { name }));
+                }
+                break;
+            case PACT_GROUP_DELETE:
+                if (accSelectedGroup === arg) {
+                    accSelectedGroup = 0;
+                    accMembers = new Set();
+                }
+                accountsMutate(sendJSON('DELETE', '/api/groups/' + arg));
+                break;
+            case PACT_GROUP_SELECT:
+                selectGroup(arg);
+                break;
+            case PACT_MEMBER_TOGGLE:
+                if (!accSelectedGroup) break;
+                if (accMembers.has(arg)) accMembers.delete(arg);
+                else accMembers.add(arg);
+                syncAccounts();
+                accountsMutate(sendJSON('PUT', '/api/groups/' + accSelectedGroup + '/members',
+                    { user_ids: [...accMembers] }));
+                break;
+        }
+    }
+
+    function handleAccountsKey(event) {
+        if (accFocus < 0) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.key === 'Enter') {
+            handlePageAction(accFocus === 0 ? PACT_USER_SUBMIT : PACT_GROUP_SUBMIT);
+        } else if (event.key === 'Backspace') {
+            accInputs[accFocus] = accInputs[accFocus].slice(0, -1);
+            syncAccounts();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && accInputs[accFocus].length < 32) {
+            accInputs[accFocus] += event.key;
+            syncAccounts();
+        } else {
+            return;
+        }
+        event.preventDefault();
     }
 
     let prevCpuTicks = null;
@@ -902,6 +1095,15 @@
             submitAuth();
         } else if (authAction === ACTION_BACK) {
             backAuth();
+        }
+        if (authScreen === SCREEN_MAIN) {
+            const page = instance.exports.GetActivePage();
+            if (page !== lastActivePage) {
+                lastActivePage = page;
+                if (page === PAGE_ACCOUNTS) loadAccounts();
+            }
+            const pageAction = instance.exports.TakePageAction();
+            if (pageAction) handlePageAction(pageAction);
         }
         renderLoopHTML();
         requestAnimationFrame(renderLoop);
