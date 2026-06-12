@@ -2,21 +2,33 @@ local _M = {}
 
 local HELPER = "/usr/local/flynas/bin/flynas-helper"
 
+-- This LuaJIT's pipe:close() returns true regardless of the child's
+-- exit status, so the status is captured in-band via a trailing
+-- EXIT:<code> marker instead.
+local function run_shell(cmd)
+    cmd = cmd .. ' 2>&1; printf "\\nEXIT:%d" "$?"'
+
+    local pipe = io.popen(cmd, "r")
+    if not pipe then
+        return nil, "popen failed"
+    end
+    local output = pipe:read("*a")
+    pipe:close()
+
+    local code = tonumber(output:match("\nEXIT:(%d+)%s*$"))
+    output = output:gsub("\n?EXIT:%d+%s*$", ""):gsub("%s+$", "")
+    if code == 0 then
+        return true
+    end
+    return nil, output ~= "" and output or ("exit code " .. (code or "unknown"))
+end
+
 local function run(args)
     local cmd = HELPER
     for _, arg in ipairs(args) do
         cmd = cmd .. " " .. arg
     end
-    cmd = cmd .. " 2>&1"
-
-    local pipe = io.popen(cmd, "r")
-    local output = pipe:read("*a")
-    local ok, _, code = pipe:close()
-
-    if ok then
-        return true
-    end
-    return nil, output ~= "" and output or ("exit code " .. (code or "unknown"))
+    return run_shell(cmd)
 end
 
 local function run_with_stdin(args, input)
@@ -24,16 +36,7 @@ local function run_with_stdin(args, input)
     for _, arg in ipairs(args) do
         cmd = cmd .. " " .. arg
     end
-    cmd = cmd .. " 2>&1"
-
-    local pipe = io.popen(cmd, "r")
-    local output = pipe:read("*a")
-    local ok, _, code = pipe:close()
-
-    if ok then
-        return true
-    end
-    return nil, output ~= "" and output or ("exit code " .. (code or "unknown"))
+    return run_shell(cmd)
 end
 
 function _M.user_add(username, shell)
@@ -74,6 +77,18 @@ end
 
 function _M.group_members(name, usernames)
     return run({ "groupmembers", name, usernames })
+end
+
+function _M.vol_create(label, disks)
+    return run({ "volcreate", label, disks })
+end
+
+function _M.vol_destroy(label)
+    return run({ "voldestroy", label })
+end
+
+function _M.vol_scrub(label)
+    return run({ "scrub", label })
 end
 
 function _M.write_ssh_keys(username, keys_text)

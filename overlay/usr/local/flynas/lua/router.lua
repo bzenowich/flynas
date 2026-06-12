@@ -5,6 +5,7 @@ local users_api = require("api.users")
 local groups_api = require("api.groups")
 local settings_api = require("api.settings")
 local dashboard_api = require("api.dashboard")
+local storage_api = require("api.storage")
 
 local uri = ngx.var.uri
 local method = ngx.req.get_method()
@@ -117,6 +118,19 @@ local routes = {
         dashboard_api.volumes()
     end,
 
+    -- Storage
+    ["GET:disks"] = function()
+        storage_api.disks()
+    end,
+
+    ["GET:volumes"] = function()
+        storage_api.list()
+    end,
+
+    ["POST:volumes"] = function()
+        storage_api.create(read_body())
+    end,
+
     -- Settings
     ["GET:settings/smtp"] = function()
         settings_api.get_smtp()
@@ -146,6 +160,10 @@ local pattern_routes = {
     { "DELETE", "^users/(%d+)/totp$",            function(id) users_api.totp_disable(tonumber(id)) end },
     { "PUT",    "^users/(%d+)/email$",           function(id) users_api.set_email(tonumber(id), read_body()) end },
     { "POST",   "^users/(%d+)/email/verify$",    function(id) users_api.verify_email(tonumber(id), read_body()) end },
+    { "GET",    "^volumes/(%d+)$",               function(id) storage_api.get(tonumber(id)) end },
+    { "DELETE", "^volumes/(%d+)$",               function(id) storage_api.delete(tonumber(id)) end },
+    { "POST",   "^volumes/(%d+)/scrub$",         function(id) storage_api.scrub(tonumber(id)) end },
+    { "PUT",    "^volumes/(%d+)/scrub/schedule$", function(id) storage_api.scrub_schedule(tonumber(id), read_body()) end },
     { "GET",    "^groups/(%d+)$",                function(id) groups_api.get(tonumber(id)) end },
     { "PUT",    "^groups/(%d+)$",                function(id) groups_api.update(tonumber(id), read_body()) end },
     { "DELETE", "^groups/(%d+)$",                function(id) groups_api.delete(tonumber(id)) end },

@@ -287,6 +287,7 @@
     const QR_POOL_BASE = 16384;
     const QR_POOL_SIZE = 16384;
     const ACCOUNTS_POOL_BASE = 32768;
+    const STOR_POOL_BASE = 49152;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -448,8 +449,11 @@
 
     function handleAuthKey(event) {
         if (authScreen === SCREEN_MAIN) {
-            if (instance.exports.GetActivePage() === PAGE_ACCOUNTS) {
+            const page = instance.exports.GetActivePage();
+            if (page === PAGE_ACCOUNTS) {
                 handleAccountsKey(event);
+            } else if (page === PAGE_STORAGE) {
+                handleStorageKey(event);
             }
             return;
         }
@@ -600,6 +604,10 @@
 
     function handlePageAction(packed) {
         const action = packed & 15, arg = packed >> 4;
+        if (action >= 10) {
+            handleStorageAction(action, arg);
+            return;
+        }
         switch (action) {
             case PACT_FOCUS:
                 accFocus = arg;
@@ -665,6 +673,133 @@
         } else if (event.key.length === 1 && accInputs[accFocus].length < 32) {
             accInputs[accFocus] += event.key;
             syncAccounts();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
+    // ----------------------------------------------------------------
+    // Storage page: volumes + disk selection for create
+    // ----------------------------------------------------------------
+    const PAGE_STORAGE = 4;
+    const PACT_VOL_CREATE = 10, PACT_VOL_DELETE = 11, PACT_VOL_SCRUB = 12,
+          PACT_DISK_TOGGLE = 13, PACT_SCRUB_TOGGLE = 14;
+
+    let storVolumes = [], storDisks = [];
+    let storSelected = new Set();   // disk names picked for a new volume
+    let storInput = '';
+    let storError = '';
+
+    function syncStorage() {
+        let off = STOR_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 128));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearStorVolumes();
+        for (const v of storVolumes) {
+            const name = write(v.name);
+            const usage = write(v.mounted
+                ? fmtBytes(v.used_kb * 1024) + ' / ' + fmtBytes(v.total_kb * 1024)
+                : '(not mounted)');
+            const disks = write((v.disks || []).map(d => d.replace('/dev/', '')).join(', '));
+            instance.exports.AddStorVolume(v.id, name.off, name.len,
+                usage.off, usage.len, disks.off, disks.len,
+                v.used_pct || 0, v.scrub_enabled ? 1 : 0, v.mounted ? 1 : 0);
+        }
+        instance.exports.ClearStorDisks();
+        for (const d of storDisks) {
+            const isFree = !d.volume && !d.system;
+            const name = write(d.name);
+            const size = write(fmtBytes(d.size_bytes));
+            const status = write(d.volume || (d.system ? 'system' : 'free'));
+            const healthy = d.smart_health === 'PASSED' || d.smart_health === 'unknown';
+            instance.exports.AddStorDisk(name.off, name.len, size.off, size.len,
+                status.off, status.len, isFree ? 1 : 0,
+                storSelected.has(d.name) ? 1 : 0, healthy ? 1 : 0);
+        }
+        const inp = write(storInput);
+        instance.exports.SetStorInput(inp.off, inp.len);
+        const err = write(storError);
+        instance.exports.SetStorError(err.off, err.len);
+    }
+
+    async function loadStorage() {
+        try {
+            const [vols, disks] = await Promise.all([
+                getJSON('/api/volumes'), getJSON('/api/disks')]);
+            storVolumes = Array.isArray(vols.volumes) ? vols.volumes : [];
+            storDisks = Array.isArray(disks.disks) ? disks.disks : [];
+            const freeNames = new Set(storDisks.filter(d => !d.volume && !d.system).map(d => d.name));
+            storSelected = new Set([...storSelected].filter(n => freeNames.has(n)));
+        } catch (err) {
+            storError = 'load failed: ' + err;
+        }
+        syncStorage();
+    }
+
+    async function storageMutate(promise) {
+        storError = '';
+        const { ok, data } = await promise;
+        if (!ok) storError = data.error || 'request failed';
+        await loadStorage();
+    }
+
+    function handleStorageAction(action, arg) {
+        switch (action) {
+            case PACT_VOL_CREATE:
+                if (storInput && storSelected.size > 0) {
+                    const name = storInput;
+                    const disks = [...storSelected];
+                    storInput = '';
+                    storSelected = new Set();
+                    storageMutate(postJSON('/api/volumes', { name, disks }));
+                } else {
+                    storError = 'pick a name and at least one free disk';
+                    syncStorage();
+                }
+                break;
+            case PACT_VOL_DELETE:
+                storageMutate(sendJSON('DELETE', '/api/volumes/' + arg));
+                break;
+            case PACT_VOL_SCRUB:
+                storageMutate(postJSON('/api/volumes/' + arg + '/scrub'));
+                break;
+            case PACT_SCRUB_TOGGLE: {
+                const v = storVolumes.find(x => x.id === arg);
+                if (v) storageMutate(sendJSON('PUT', '/api/volumes/' + arg + '/scrub/schedule',
+                    { enabled: !v.scrub_enabled }));
+                break;
+            }
+            case PACT_DISK_TOGGLE: {
+                const d = storDisks[arg];
+                if (!d || d.volume || d.system) break;
+                if (storSelected.has(d.name)) storSelected.delete(d.name);
+                else storSelected.add(d.name);
+                syncStorage();
+                break;
+            }
+        }
+    }
+
+    function handleStorageKey(event) {
+        if (accFocus !== 2) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.key === 'Enter') {
+            handleStorageAction(PACT_VOL_CREATE, 0);
+        } else if (event.key === 'Backspace') {
+            storInput = storInput.slice(0, -1);
+            syncStorage();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && storInput.length < 16) {
+            storInput += event.key;
+            syncStorage();
         } else {
             return;
         }
@@ -1101,6 +1236,7 @@
             if (page !== lastActivePage) {
                 lastActivePage = page;
                 if (page === PAGE_ACCOUNTS) loadAccounts();
+                else if (page === PAGE_STORAGE) loadStorage();
             }
             const pageAction = instance.exports.TakePageAction();
             if (pageAction) handlePageAction(pageAction);

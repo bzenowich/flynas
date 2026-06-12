@@ -309,38 +309,41 @@ Key generation: `ssh-keygen -t ed25519` for keypair. Encrypt private key with AE
 
 **Status: DONE** (`api/users.lua`, `api/groups.lua`) — users/groups CRUD, SSH keys, per-user TOTP setup/confirm/disable, email set/verify, keypair generation (`POST /api/users/:id/keypair`: ed25519 via ssh-keygen, private key returned AES-128-CBC/PBKDF2 encrypted, public key auto-added to authorized_keys). Also added (not in original plan): SMTP settings API (`GET/PUT /api/settings/smtp`, `POST /api/settings/smtp/test`) for email-code auth.
 
-### 2.5 Storage API
+### 2.5 Storage API — DONE (diverged: fixed disk set per volume)
 
-Uses HAMMER2 multi-volume support. A volume starts on one disk and can be expanded by adding more disks with `hammer2 volume-add`. Data is striped across volumes automatically by HAMMER2.
+**Plan change:** DragonFly 6.4 has no `hammer2 volume-add` / `volume-del` —
+those commands don't exist in the 6.4 userland (verified on h2dev). HAMMER2
+multi-volume filesystems are instead created across a fixed set of disks at
+`newfs` time and cannot be grown or shrunk dynamically. FlyNAS therefore asks
+for all member disks when a volume is created. Expansion = create a new
+volume, or future `hammer2 growfs` after partition resize.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/disks` | GET | List all disks with serial, size, SMART health, and volume membership |
-| `/api/volumes` | GET | List HAMMER2 volumes with size, usage, disk count |
-| `/api/volumes` | POST | Create volume: `newfs_hammer2 -L <name> <device>`, mount it |
-| `/api/volumes/:id` | GET | Volume details: disk list, usage, PFS list |
-| `/api/volumes/:id/disks` | POST | Add disk to volume: `hammer2 volume-add <device> <mountpoint>` |
-| `/api/volumes/:id/disks/:did` | DELETE | Remove disk from volume: `hammer2 volume-del <device> <mountpoint>` |
-| `/api/volumes/:id/scrub` | POST | Trigger manual scrub: `hammer2 -f <device> bulkfree` |
-| `/api/volumes/:id/scrub/schedule` | PUT | Enable/disable daily scrub |
+| `/api/disks` | GET | All disks with size, SMART health, volume membership, `system` flag (mounted but not ours) |
+| `/api/volumes` | GET | Volumes from DB + live df usage + mounted flag |
+| `/api/volumes` | POST | `{name, disks:[...]}` — format all disks (`newfs_hammer2 -L <name> /dev/d1 /dev/d2 ...`), mount at `/data/<name>`, add fstab entry |
+| `/api/volumes/:id` | GET | Volume details: disks, usage |
+| `/api/volumes/:id` | DELETE | Unmount, remove fstab entry, forget (disks not wiped) |
+| `/api/volumes/:id/scrub` | POST | `hammer2 bulkfree /data/<name>` (synchronous; background job TODO for big volumes) |
+| `/api/volumes/:id/scrub/schedule` | PUT | Toggle `scrub_enabled` flag (cron wiring in Phase 4) |
 
-**Volume lifecycle:**
+**Verified volume lifecycle (h2dev):**
 
 ```sh
-# Create a new volume on /dev/da0
-newfs_hammer2 -L data /dev/da0s1
-mount_hammer2 /dev/da0s1@DATA /mnt/data
+# Create a volume spanning two raw disks (no partitioning needed)
+newfs_hammer2 -L tank /dev/vbd1 /dev/vbd2
+mount_hammer2 /dev/vbd1:/dev/vbd2@tank /data/tank
+# fstab: /dev/vbd1:/dev/vbd2@tank  /data/tank  hammer2  rw  0  0
 
-# Expand volume by adding /dev/da1
-hammer2 volume-add /dev/da1s1 /mnt/data
-
-# Later, remove a disk (data migrates off first)
-hammer2 volume-del /dev/da1s1 /mnt/data
+hammer2 bulkfree /data/tank          # scrub
+hammer2 -s /data/tank volume-list    # member devices
 ```
 
-**Persistent mounts:** Volume mounts are written to `/etc/fstab`. Added disks are recorded in the `volume_disks` table so the UI can show which disks belong to which volume.
-
-Shell scripts wrap `hammer2` commands. Scrub cron job: `hammer2 -f <device> bulkfree`.
+All privileged ops go through `flynas-helper` (`volcreate`, `voldestroy`,
+`scrub`, `vollist`): it validates label/disk names, refuses disks that are
+mounted or referenced in fstab (protects the system disk), and edits fstab
+atomically. Mountpoints live under `/data/<name>`.
 
 ### 2.6 Backup API
 
@@ -495,7 +498,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Remaining pages are placeholders.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Remaining pages are placeholders.
 
 ---
 
@@ -567,7 +570,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 | 5 | Clay UI scaffold + dashboard page | 4 | ✅ done (incl. login/setup flow + QR) |
 | 6 | Network API + UI | 3 | — |
 | 7 | Accounts API + UI | 3 | ✅ done |
-| 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | — |
+| 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | ✅ done |
 | 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | — |
 | 10 | VM API + UI (QEMU/NVMM) | 8 | — |
 | 11 | App templates + one-click install | 10 | — |
@@ -579,7 +582,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Resolved Decisions
 
-1. **HAMMER2 multi-disk**: Use HAMMER2's native multi-volume support (`hammer2 volume-add` / `hammer2 volume-del`). No LVM or software RAID layer.
+1. **HAMMER2 multi-disk**: Use HAMMER2's native multi-volume support with the disk set fixed at creation (`newfs_hammer2` across multiple raw disks). No LVM or software RAID layer. `volume-add`/`volume-del` do not exist on DragonFly 6.4, so volumes cannot be grown/shrunk after creation.
 2. **Encrypted backup**: Use `cryfs-batch` (separate project, see `cryfs-batch/SPEC.md`). Implements CryFS security model without FUSE.
 3. **Clay WASM toolchain**: Cross-compile on Linux. Deploy built artifacts (`.wasm` + `.js`) to DragonFlyBSD. No WASM toolchain needed on the NAS.
 4. **Passwordless auth**: No user-chosen passwords. Initial setup enrolls admin TOTP (QR + manual secret); login verifies TOTP or emailed one-time code. System accounts get random argon2-hashed passwords, created via a setuid helper (`scripts/flynas-helper.c`) so nginx workers never run privileged commands.
@@ -587,6 +590,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Progress Log
 
+- **2026-06-12**: Steps 7+8 done. Accounts: keypair endpoint, Accounts page (users/groups/membership/SSH/keygen-download), verified in headless Chrome. Storage: helper volcreate/voldestroy/scrub/vollist, storage API, Storage page (disk picker, create/delete/scrub), verified end-to-end on vbd1–vbd4. Found+fixed: (1) user/group DELETE silently failed via user_groups FK (no cascade); (2) **LuaJIT `pipe:close()` on this platform always returns true** — all helper exit codes were swallowed; exec.lua/users.lua now append an in-band `EXIT:<code>` marker. Plan change: no `volume-add`/`volume-del` on DragonFly 6.4 (open question 3 resolved). Test volumes removed from h2dev afterwards — fstab entries pointing at harness scratch disks would break boot when the harness regenerates them.
 - **2026-06-11**: Login/setup flow in Clay UI — auth screens in C, state machine + keyboard input in JS, public `GET /api/setup/status`, TOTP QR code on setup screen (vendored qrcode-generator). Fixed `is_setup_done` error swallowing. Verified end-to-end in headless Chrome against h2dev (login → TOTP → dashboard; QR decodes to correct otpauth URI).
 - **Earlier**: VM bootstrap (openresty, argon2, setuid helper), session auth → passwordless conversion, dashboard API + Clay dashboard page.
 
@@ -594,4 +598,4 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 1. **Seafile on DragonFlyBSD VM**: Seafile typically runs on Linux. The VM approach (QEMU/NVMM with a Linux guest) handles this, but need to create/test the post-install automation scripts.
 2. **Tap networking for VMs**: Need to configure bridge interface and tap devices. Verify DragonFlyBSD bridge/tap support and document setup.
-3. **HAMMER2 volume-del behavior**: Verify that `hammer2 volume-del` migrates data off the disk before removal, or if FlyNAS needs to handle data migration manually before issuing the command.
+3. ~~**HAMMER2 volume-del behavior**~~: RESOLVED 2026-06-12 — `volume-add`/`volume-del` do not exist in DragonFly 6.4's hammer2(8). Volume disk sets are fixed at creation; see §2.5.

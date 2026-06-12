@@ -319,15 +319,19 @@ function _M.delete_ssh_key(user_id, key_id)
     json.response({ status = "ok" })
 end
 
--- Run a shell command, return output and success flag
+-- Run a shell command, return output and success flag. pipe:close()
+-- on this LuaJIT doesn't report exit status, so it is captured
+-- in-band via a trailing EXIT:<code> marker.
 local function capture(cmd)
-    local pipe = io.popen(cmd .. " 2>&1", "r")
+    local pipe = io.popen(cmd .. ' 2>&1; printf "\\nEXIT:%d" "$?"', "r")
     if not pipe then
         return nil, false
     end
     local output = pipe:read("*a")
-    local ok = pipe:close()
-    return output, ok and true or false
+    pipe:close()
+    local code = tonumber(output:match("\nEXIT:(%d+)%s*$"))
+    output = output:gsub("\n?EXIT:%d+%s*$", "")
+    return output, code == 0
 end
 
 -- Shell single-quote escaping for untrusted strings

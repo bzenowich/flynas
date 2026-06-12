@@ -56,9 +56,9 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 // ---------------------------------------------------------------
 #define MAX_ROWS 16
 // 0..12287 dashboard (reset each poll), 12288..16383 auth strings,
-// 16384..32767 QR code data URL, 32768..49151 accounts page —
-// keep in sync with index.html
-#define STRING_POOL_SIZE 49152
+// 16384..32767 QR code data URL, 32768..49151 accounts page,
+// 49152..65535 storage page — keep in sync with index.html
+#define STRING_POOL_SIZE 65536
 
 typedef struct {
     Clay_String name;
@@ -229,6 +229,11 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_GROUP_SELECT    7
 #define PACT_MEMBER_TOGGLE   8
 #define PACT_FOCUS           9
+#define PACT_VOL_CREATE      10
+#define PACT_VOL_DELETE      11
+#define PACT_VOL_SCRUB       12
+#define PACT_DISK_TOGGLE     13
+#define PACT_SCRUB_TOGGLE    14
 #define PACT_PACK(action, arg) ((action) | ((arg) << 4))
 
 typedef struct {
@@ -353,6 +358,92 @@ void HandleFocus(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *u
     if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
         accFocus = (int)(intptr_t)userData;
         pendingPageAction = PACT_PACK(PACT_FOCUS, accFocus);
+    }
+}
+
+// ---------------------------------------------------------------
+// Storage page state, same JS-feeds-C pattern as accounts
+// ---------------------------------------------------------------
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String usage;     // "1.2 GB / 7.6 GB" or "(not mounted)"
+    Clay_String disks;     // "vbd1, vbd2"
+    float pct;
+    bool scrub, mounted;
+} StorVolRow;
+
+typedef struct {
+    Clay_String name;
+    Clay_String size;
+    Clay_String status;    // volume name, "system" or "free"
+    bool free, selected, healthy;
+} StorDiskRow;
+
+static StorVolRow storVols[MAX_ROWS];
+static int storVolCount = 0;
+static StorDiskRow storDisks[MAX_ROWS];
+static int storDiskCount = 0;
+static Clay_String storInput;
+static Clay_String storError;
+static int storPendingDeleteVol = 0;
+
+CLAY_WASM_EXPORT("ClearStorVolumes") void ClearStorVolumes(void) {
+    storVolCount = 0;
+    storPendingDeleteVol = 0;
+}
+
+CLAY_WASM_EXPORT("AddStorVolume")
+void AddStorVolume(int id,
+                   uint32_t nameOff, uint32_t nameLen,
+                   uint32_t usageOff, uint32_t usageLen,
+                   uint32_t disksOff, uint32_t disksLen,
+                   float pct, bool scrub, bool mounted) {
+    if (storVolCount >= MAX_ROWS) return;
+    storVols[storVolCount++] = (StorVolRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .usage = poolString(usageOff, usageLen),
+        .disks = poolString(disksOff, disksLen),
+        .pct = pct, .scrub = scrub, .mounted = mounted,
+    };
+}
+
+CLAY_WASM_EXPORT("ClearStorDisks") void ClearStorDisks(void) {
+    storDiskCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddStorDisk")
+void AddStorDisk(uint32_t nameOff, uint32_t nameLen,
+                 uint32_t sizeOff, uint32_t sizeLen,
+                 uint32_t statusOff, uint32_t statusLen,
+                 bool isFree, bool selected, bool healthy) {
+    if (storDiskCount >= MAX_ROWS) return;
+    storDisks[storDiskCount++] = (StorDiskRow) {
+        .name = poolString(nameOff, nameLen),
+        .size = poolString(sizeOff, sizeLen),
+        .status = poolString(statusOff, statusLen),
+        .free = isFree, .selected = selected, .healthy = healthy,
+    };
+}
+
+CLAY_WASM_EXPORT("SetStorInput") void SetStorInput(uint32_t off, uint32_t len) {
+    storInput = poolString(off, len);
+}
+
+CLAY_WASM_EXPORT("SetStorError") void SetStorError(uint32_t off, uint32_t len) {
+    storError = poolString(off, len);
+}
+
+void HandleVolDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int vid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (storPendingDeleteVol == vid) {
+            pendingPageAction = PACT_PACK(PACT_VOL_DELETE, vid);
+            storPendingDeleteVol = 0;
+        } else {
+            storPendingDeleteVol = vid;
+        }
     }
 }
 
@@ -763,6 +854,137 @@ void GroupsCard(void) {
     }
 }
 
+// ---------------------------------------------------------------
+// Storage page
+// ---------------------------------------------------------------
+void StorVolumesCard(void) {
+    CARD("StorVolumesCard") {
+        CardTitle(CLAY_STRING("Volumes"));
+        if (storVolCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No volumes — select free disks and create one"),
+                CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < storVolCount; i++) {
+            StorVolRow *v = &storVols[i];
+            CLAY(CLAY_IDI("StorVol", v->id), { .layout = {
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 8,
+            } }) {
+                CLAY(CLAY_IDI("StorVolHead", v->id), { .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 10,
+                    .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                } }) {
+                    CLAY_TEXT(v->name, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_MONO, .fontSize = 18, .textColor = COLOR_TEXT }));
+                    CLAY_TEXT(v->disks, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+                    CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                    CLAY_TEXT(v->usage, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 15,
+                        .textColor = v->mounted ? COLOR_TEXT : COLOR_WARN }));
+                }
+                if (v->mounted) {
+                    GaugeBar(v->pct);
+                }
+                CLAY(CLAY_IDI("StorVolBtns", v->id), { .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 10,
+                } }) {
+                    SmallButton(CLAY_IDI("VolScrub", v->id), CLAY_STRING("Scrub now"),
+                        COLOR_ACCENT, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VOL_SCRUB, v->id));
+                    SmallButton(CLAY_IDI("VolAuto", v->id),
+                        v->scrub ? CLAY_STRING("Auto-scrub on") : CLAY_STRING("Auto-scrub off"),
+                        v->scrub ? COLOR_GOOD : COLOR_MUTED, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_SCRUB_TOGGLE, v->id));
+                    CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                    SmallButton(CLAY_IDI("VolDel", v->id),
+                        storPendingDeleteVol == v->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                        COLOR_BAD, HandleVolDelete, (void *)(intptr_t)v->id);
+                }
+            }
+        }
+    }
+}
+
+void StorDisksCard(void) {
+    CLAY(CLAY_ID("StorDisksCard"), {
+        .layout = {
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .sizing = { .width = CLAY_SIZING_FIXED(380) },
+            .padding = CLAY_PADDING_ALL(20),
+            .childGap = 12,
+        },
+        .backgroundColor = COLOR_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+    }) {
+        CardTitle(CLAY_STRING("Disks"));
+        for (int i = 0; i < storDiskCount; i++) {
+            StorDiskRow *d = &storDisks[i];
+            CLAY(CLAY_IDI("StorDisk", i), {
+                .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 8,
+                    .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                },
+                .userData = FrameAllocateCustomData((CustomHTMLData) {
+                    .cursorPointer = d->free }),
+            }) {
+                if (d->free) {
+                    Clay_OnHover(HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_DISK_TOGGLE, i));
+                }
+                CLAY_TEXT(d->free ? (d->selected ? CLAY_STRING("[x]") : CLAY_STRING("[ ]"))
+                                  : CLAY_STRING("   "),
+                    CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_MONO, .fontSize = 15,
+                        .textColor = d->selected ? COLOR_ACCENT : COLOR_MUTED,
+                        .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                    }));
+                CLAY_TEXT(d->name, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT,
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                }));
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                CLAY_TEXT(d->size, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED,
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                }));
+                CLAY_TEXT(d->status, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14,
+                    .textColor = d->free ? COLOR_GOOD : (d->healthy ? COLOR_MUTED : COLOR_WARN),
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                }));
+            }
+        }
+        CLAY(CLAY_ID("StorAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            TextInputBox(CLAY_ID("StorInput"), storInput, CLAY_STRING("volume name"), 2);
+            SmallButton(CLAY_ID("StorCreateBtn"), CLAY_STRING("Create"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_VOL_CREATE, 0));
+        }
+    }
+}
+
+void StoragePage(void) {
+    CLAY(CLAY_ID("StorageRow"), { .layout = {
+        .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
+        StorVolumesCard();
+        StorDisksCard();
+    }
+    if (storError.length > 0) {
+        CLAY_TEXT(storError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+    }
+}
+
 void AccountsPage(void) {
     CLAY(CLAY_ID("AccountsRow"), { .layout = {
         .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
@@ -1009,6 +1231,8 @@ Clay_RenderCommandArray CreateLayout(float deltaTime) {
                     DashboardPage();
                 } else if (activePage == 3) {
                     AccountsPage();
+                } else if (activePage == 4) {
+                    StoragePage();
                 } else {
                     PlaceholderPage();
                 }
