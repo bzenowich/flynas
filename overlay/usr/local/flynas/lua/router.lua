@@ -33,6 +33,7 @@ end
 -- Routes that do NOT require authentication
 local public_routes = {
     ["GET:health"] = true,
+    ["GET:setup/status"] = true,
     ["POST:setup"] = true,
     ["POST:setup/confirm"] = true,
     ["POST:login"] = true,
@@ -43,6 +44,10 @@ local public_routes = {
 local routes = {
     ["GET:health"] = function()
         json.response({ status = "ok" })
+    end,
+
+    ["GET:setup/status"] = function()
+        auth_api.setup_status()
     end,
 
     ["POST:setup"] = function()

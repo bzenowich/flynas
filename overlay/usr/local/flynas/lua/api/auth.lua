@@ -13,6 +13,17 @@ local function valid_username(s)
     return s and #s >= 1 and #s <= 32 and s:match("^[a-z_][a-z0-9_%-]*$")
 end
 
+-- GET /api/setup/status — public: has initial setup been completed?
+function _M.setup_status()
+    local done, err = auth.is_setup_done()
+    if err then
+        ngx.log(ngx.ERR, "setup check failed: ", err)
+        json.response({ error = "internal error" }, 500)
+        return
+    end
+    json.response({ setup_done = done and true or false })
+end
+
 -- POST /api/setup — step 1: generate TOTP secret
 function _M.setup(body)
     local done, err = auth.is_setup_done()

@@ -160,6 +160,50 @@ void AddDisk(uint32_t nameOff, uint32_t nameLen,
 }
 
 // ---------------------------------------------------------------
+// Auth flow state. Screen transitions and all API calls happen in
+// JS; C only renders the current screen and reports button presses
+// back via TakeAction().
+// ---------------------------------------------------------------
+#define SCREEN_LOADING        0
+#define SCREEN_SETUP_USERNAME 1
+#define SCREEN_SETUP_TOTP     2
+#define SCREEN_LOGIN_USERNAME 3
+#define SCREEN_LOGIN_CODE     4
+#define SCREEN_MAIN           5
+
+#define ACTION_NONE   0
+#define ACTION_SUBMIT 1
+#define ACTION_BACK   2
+
+static int screen = SCREEN_LOADING;
+static Clay_String authInput = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
+static Clay_String authError = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
+static Clay_String authInfo  = { .isStaticallyAllocated = true, .length = 0, .chars = "" };
+static int pendingAction = ACTION_NONE;
+
+CLAY_WASM_EXPORT("SetScreen") void SetScreen(int s) {
+    screen = s;
+}
+
+CLAY_WASM_EXPORT("SetAuthInput") void SetAuthInput(uint32_t off, uint32_t len) {
+    authInput = poolString(off, len);
+}
+
+CLAY_WASM_EXPORT("SetAuthError") void SetAuthError(uint32_t off, uint32_t len) {
+    authError = poolString(off, len);
+}
+
+CLAY_WASM_EXPORT("SetAuthInfo") void SetAuthInfo(uint32_t off, uint32_t len) {
+    authInfo = poolString(off, len);
+}
+
+CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
+    int a = pendingAction;
+    pendingAction = ACTION_NONE;
+    return a;
+}
+
+// ---------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------
 static Clay_String NAV_ITEMS[] = {
@@ -376,8 +420,182 @@ void PlaceholderPage(void) {
     }
 }
 
+// ---------------------------------------------------------------
+// Auth screens (setup wizard + login)
+// ---------------------------------------------------------------
+void HandleAuthButton(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        pendingAction = (int)(intptr_t)userData;
+    }
+}
+
+void AuthButton(Clay_String label, int action, bool primary) {
+    CLAY(CLAY_IDI("AuthButton", action), {
+        .layout = {
+            .padding = { 20, 20, 10, 10 },
+            .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = primary
+            ? (Clay_Hovered() ? (Clay_Color) {30, 169, 233, 255} : COLOR_ACCENT)
+            : (Clay_Hovered() ? COLOR_NAV_HOVER : COLOR_CARD),
+        .cornerRadius = CLAY_CORNER_RADIUS(6),
+        .border = primary ? (Clay_BorderElementConfig) {}
+                          : (Clay_BorderElementConfig) { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+        .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+    }) {
+        Clay_OnHover(HandleAuthButton, (void *)(intptr_t)action);
+        CLAY_TEXT(label, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 18,
+            .textColor = primary ? (Clay_Color) {255, 255, 255, 255} : COLOR_TEXT,
+            .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+        }));
+    }
+}
+
+void AuthInputBox(Clay_String placeholder) {
+    CLAY(CLAY_ID("AuthInputBox"), {
+        .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(44) },
+            .padding = { 12, 12, 0, 0 },
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            .childGap = 2,
+        },
+        .backgroundColor = COLOR_BG,
+        .cornerRadius = CLAY_CORNER_RADIUS(6),
+        .border = { .color = COLOR_ACCENT, .width = { 1, 1, 1, 1 } },
+    }) {
+        if (authInput.length == 0) {
+            CLAY_TEXT(placeholder, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 18, .textColor = COLOR_MUTED }));
+        } else {
+            CLAY_TEXT(authInput, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_MONO, .fontSize = 18, .textColor = COLOR_TEXT }));
+        }
+        // Caret
+        CLAY(CLAY_ID("AuthCaret"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_FIXED(2), .height = CLAY_SIZING_FIXED(22) } },
+            .backgroundColor = COLOR_ACCENT,
+        }) {}
+    }
+}
+
+void AuthPage(void) {
+    CLAY(CLAY_ID("AuthRoot"), { .layout = {
+        .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+        .layoutDirection = CLAY_TOP_TO_BOTTOM,
+        .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+        .childGap = 24,
+    } }) {
+        CLAY_TEXT(CLAY_STRING("FlyNAS"), CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 36, .textColor = COLOR_ACCENT }));
+
+        // No early return inside a CLAY() block — it would skip the
+        // implicit Clay__CloseElement and corrupt the layout tree.
+        if (screen == SCREEN_LOADING) {
+            CLAY_TEXT(CLAY_STRING("Loading..."), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 20, .textColor = COLOR_MUTED }));
+        } else CLAY(CLAY_ID("AuthCard"), {
+            .layout = {
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                .sizing = { .width = CLAY_SIZING_FIXED(420) },
+                .padding = CLAY_PADDING_ALL(32),
+                .childGap = 16,
+            },
+            .backgroundColor = COLOR_CARD,
+            .cornerRadius = CLAY_CORNER_RADIUS(10),
+            .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+        }) {
+            Clay_String title, prompt, placeholder, submitLabel;
+            bool hasBack = false;
+            bool monoInfo = false;
+
+            switch (screen) {
+            case SCREEN_SETUP_USERNAME:
+                title       = CLAY_STRING("Welcome to FlyNAS");
+                prompt      = CLAY_STRING("Create the admin account to get started.");
+                placeholder = CLAY_STRING("username");
+                submitLabel = CLAY_STRING("Continue");
+                break;
+            case SCREEN_SETUP_TOTP:
+                title       = CLAY_STRING("Set up two-factor auth");
+                prompt      = CLAY_STRING("Add this secret to your authenticator app, then enter the 6-digit code it shows.");
+                placeholder = CLAY_STRING("123456");
+                submitLabel = CLAY_STRING("Verify");
+                hasBack = true;
+                monoInfo = true;
+                break;
+            case SCREEN_LOGIN_CODE:
+                title       = CLAY_STRING("Verification code");
+                prompt      = CLAY_STRING("Enter your one-time code.");
+                placeholder = CLAY_STRING("123456");
+                submitLabel = CLAY_STRING("Verify");
+                hasBack = true;
+                break;
+            default: // SCREEN_LOGIN_USERNAME
+                title       = CLAY_STRING("Sign in");
+                prompt      = CLAY_STRING("Enter your username to continue.");
+                placeholder = CLAY_STRING("username");
+                submitLabel = CLAY_STRING("Continue");
+                break;
+            }
+
+            CLAY_TEXT(title, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 24, .textColor = COLOR_TEXT }));
+            CLAY_TEXT(prompt, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+
+            // Context from JS: TOTP secret during setup, email hint during login
+            if (authInfo.length > 0) {
+                if (monoInfo) {
+                    CLAY(CLAY_ID("AuthSecretBox"), {
+                        .layout = {
+                            .sizing = { .width = CLAY_SIZING_GROW(0) },
+                            .padding = CLAY_PADDING_ALL(12),
+                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER },
+                        },
+                        .backgroundColor = COLOR_BG,
+                        .cornerRadius = CLAY_CORNER_RADIUS(6),
+                        .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+                    }) {
+                        CLAY_TEXT(authInfo, CLAY_TEXT_CONFIG({
+                            .fontId = FONT_ID_MONO, .fontSize = 18, .textColor = COLOR_TEXT }));
+                    }
+                } else {
+                    CLAY_TEXT(authInfo, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_TEXT }));
+                }
+            }
+
+            AuthInputBox(placeholder);
+
+            if (authError.length > 0) {
+                CLAY_TEXT(authError, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+            }
+
+            CLAY(CLAY_ID("AuthButtons"), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 12 } }) {
+                if (hasBack) {
+                    AuthButton(CLAY_STRING("Back"), ACTION_BACK, false);
+                }
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                AuthButton(submitLabel, ACTION_SUBMIT, true);
+            }
+        }
+    }
+}
+
 Clay_RenderCommandArray CreateLayout(float deltaTime) {
     Clay_BeginLayout();
+    if (screen != SCREEN_MAIN) {
+        CLAY(CLAY_ID("Root"), {
+            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } },
+            .backgroundColor = COLOR_BG,
+        }) {
+            AuthPage();
+        }
+        return Clay_EndLayout(deltaTime);
+    }
     CLAY(CLAY_ID("Root"), {
         .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } },
         .backgroundColor = COLOR_BG,

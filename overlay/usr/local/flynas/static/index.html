@@ -270,6 +270,173 @@
         return resp.json();
     }
 
+    // ----------------------------------------------------------------
+    // Auth flow: screen transitions and API calls live here; the C
+    // side only renders the active screen and reports button presses.
+    // ----------------------------------------------------------------
+    const SCREEN_LOADING = 0, SCREEN_SETUP_USERNAME = 1, SCREEN_SETUP_TOTP = 2,
+          SCREEN_LOGIN_USERNAME = 3, SCREEN_LOGIN_CODE = 4, SCREEN_MAIN = 5;
+    const ACTION_SUBMIT = 1, ACTION_BACK = 2;
+    // Top of the 16KB string pool is reserved for auth strings so the
+    // dashboard's poolReset()/poolWrite() (offset 0 upward) never
+    // clobbers them.
+    const AUTH_POOL_BASE = 12288;
+
+    let authScreen = SCREEN_LOADING;
+    let authInputText = '';
+    let authErrorText = '';
+    let authInfoText = '';
+    let setupToken = null;
+    let loginToken = null;
+    let authBusy = false;
+    let dashboardTimer = null;
+
+    function syncAuth() {
+        let off = AUTH_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(str.slice(0, 256));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        const inp = write(authInputText);
+        const err = write(authErrorText);
+        const info = write(authInfoText);
+        instance.exports.SetAuthInput(inp.off, inp.len);
+        instance.exports.SetAuthError(err.off, err.len);
+        instance.exports.SetAuthInfo(info.off, info.len);
+        instance.exports.SetScreen(authScreen);
+    }
+
+    function setAuthScreen(screen, info) {
+        authScreen = screen;
+        authInputText = '';
+        authErrorText = '';
+        authInfoText = info || '';
+        syncAuth();
+    }
+
+    function enterMain() {
+        setupToken = null;
+        loginToken = null;
+        authScreen = SCREEN_MAIN;
+        instance.exports.SetScreen(SCREEN_MAIN);
+        refreshDashboard();
+        if (!dashboardTimer) dashboardTimer = setInterval(refreshDashboard, 5000);
+    }
+
+    async function postJSON(url, body) {
+        const resp = await fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {}),
+        });
+        let data = {};
+        try { data = await resp.json(); } catch (e) {}
+        return { ok: resp.ok, data };
+    }
+
+    async function submitAuth() {
+        if (authBusy || authInputText.length === 0) return;
+        authBusy = true;
+        authErrorText = '';
+        syncAuth();
+        try {
+            if (authScreen === SCREEN_SETUP_USERNAME) {
+                const { ok, data } = await postJSON('/api/setup', { username: authInputText });
+                if (ok) {
+                    setupToken = data.setup_token;
+                    setAuthScreen(SCREEN_SETUP_TOTP, data.totp_secret);
+                } else {
+                    authErrorText = data.error || 'setup failed';
+                }
+            } else if (authScreen === SCREEN_SETUP_TOTP) {
+                const { ok, data } = await postJSON('/api/setup/confirm',
+                    { setup_token: setupToken, totp_code: authInputText });
+                if (ok) {
+                    enterMain();
+                } else if ((data.error || '').includes('token')) {
+                    // Pending sessions are one-time use; restart on token errors
+                    setAuthScreen(SCREEN_SETUP_USERNAME);
+                    authErrorText = 'Setup session expired — start again';
+                } else {
+                    authErrorText = data.error || 'verification failed';
+                }
+            } else if (authScreen === SCREEN_LOGIN_USERNAME) {
+                const { ok, data } = await postJSON('/api/login', { username: authInputText });
+                if (ok) {
+                    loginToken = data.login_token;
+                    const info = data.auth_method === 'email'
+                        ? 'Code sent to ' + (data.email_hint || 'your email')
+                        : 'Enter the code from your authenticator app';
+                    setAuthScreen(SCREEN_LOGIN_CODE, info);
+                } else {
+                    authErrorText = data.error || 'login failed';
+                }
+            } else if (authScreen === SCREEN_LOGIN_CODE) {
+                const { ok, data } = await postJSON('/api/login/verify',
+                    { login_token: loginToken, code: authInputText });
+                if (ok) {
+                    enterMain();
+                } else if ((data.error || '').includes('token')) {
+                    setAuthScreen(SCREEN_LOGIN_USERNAME);
+                    authErrorText = 'Login session expired — start again';
+                } else {
+                    authErrorText = data.error || 'verification failed';
+                }
+            }
+        } catch (err) {
+            authErrorText = 'network error';
+        }
+        authBusy = false;
+        if (authScreen !== SCREEN_MAIN) syncAuth();
+    }
+
+    function backAuth() {
+        if (authScreen === SCREEN_SETUP_TOTP) {
+            setAuthScreen(SCREEN_SETUP_USERNAME);
+        } else if (authScreen === SCREEN_LOGIN_CODE) {
+            setAuthScreen(SCREEN_LOGIN_USERNAME);
+        }
+    }
+
+    function handleAuthKey(event) {
+        if (authScreen === SCREEN_MAIN || authScreen === SCREEN_LOADING) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.key === 'Enter') {
+            submitAuth();
+        } else if (event.key === 'Backspace') {
+            authInputText = authInputText.slice(0, -1);
+            syncAuth();
+        } else if (event.key === 'Escape') {
+            backAuth();
+        } else if (event.key.length === 1 && authInputText.length < 64) {
+            authInputText += event.key;
+            syncAuth();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
+    async function startApp() {
+        try {
+            const sess = await fetch('/api/session', { credentials: 'same-origin' });
+            if (sess.ok) {
+                enterMain();
+                return;
+            }
+            const status = await getJSON('/api/setup/status');
+            setAuthScreen(status.setup_done ? SCREEN_LOGIN_USERNAME : SCREEN_SETUP_USERNAME);
+        } catch (err) {
+            setAuthScreen(SCREEN_LOGIN_USERNAME);
+            authErrorText = 'API unreachable: ' + err;
+            syncAuth();
+        }
+    }
+
     let prevCpuTicks = null;
 
     async function refreshDashboard() {
@@ -340,7 +507,12 @@
             }
         } catch (err) {
             if (err === 'unauthorized') {
-                setStatus('Not logged in');
+                // Session expired — stop polling and return to login
+                if (dashboardTimer) {
+                    clearInterval(dashboardTimer);
+                    dashboardTimer = null;
+                }
+                setAuthScreen(SCREEN_LOGIN_USERNAME);
             } else {
                 setStatus('API error: ' + err);
             }
@@ -440,8 +612,8 @@
         instance.exports.SetScratchMemory(clayScratchSpaceAddress);
         renderCommandSize = getStructTotalSize(renderCommandDefinition);
         stringPoolBase = instance.exports.GetStringPool();
-        refreshDashboard();
-        setInterval(refreshDashboard, 5000);
+        document.addEventListener("keydown", handleAuthKey);
+        startApp();
         renderLoop();
     }
 
@@ -684,6 +856,12 @@
         const elapsed = currentTime - previousFrameTime;
         previousFrameTime = currentTime;
         instance.exports.UpdateDrawFrame(scratchSpaceAddress, window.innerWidth, window.innerHeight, 0, 0, window.mousePositionXThisFrame, window.mousePositionYThisFrame, window.touchDown, window.mouseDown, 0, 0, 0, elapsed / 1000);
+        const authAction = instance.exports.TakeAction();
+        if (authAction === ACTION_SUBMIT) {
+            submitAuth();
+        } else if (authAction === ACTION_BACK) {
+            backAuth();
+        }
         renderLoopHTML();
         requestAnimationFrame(renderLoop);
         window.mouseDownThisFrame = false;
