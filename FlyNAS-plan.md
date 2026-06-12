@@ -350,7 +350,7 @@ All privileged ops go through `flynas-helper` (`volcreate`, `voldestroy`,
 mounted or referenced in fstab (protects the system disk), and edits fstab
 atomically. Mountpoints live under `/data/<name>`.
 
-### 2.6 Backup API
+### 2.6 Backup API — DONE (diverged: live-source backup, no snapshot mounts)
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -378,6 +378,41 @@ atomically. Mountpoints live under `/data/<name>`.
 1. `cryfs-batch backup --source <snapshot_mount> --remote ~/.cryfs-batch/blocks/ --password-file <keyfile>`
 2. `rclone sync ~/.cryfs-batch/blocks/ remote:mybucket/encrypted/`
 3. See `cryfs-batch/SPEC.md` for full specification
+
+**Implementation notes (2026-06-12):**
+- Snapshots: helper `snapcreate`/`snapdelete`/`snaplist` (HAMMER2 PFS ops); names
+  are forced to a `snap-` prefix (`snap-{m,h,d,w,y}-<stamp>`) so `snapdelete` can
+  never address a volume root PFS. Manual snapshots have `retention = NULL`.
+- **Backup reads the live mountpoint, not a snapshot mount**: mounting a snapshot
+  PFS of a multi-volume HAMMER2 panics the 6.4 kernel
+  (`hammer2_base_delete: element not found` in flush; reproduced on h2dev's
+  RAID6-patched kernel, full reboot + UFS fsck needed). Transient backup
+  snapshots stay disabled until that kernel bug is fixed. Snapshot
+  create/delete/pfs-list themselves are safe and verified.
+- Sync job: API writes `run/backup-job.json` as key=value lines (not JSON —
+  cjson escapes slashes and randomizes key order, unparseable from sh), then
+  `flynas-helper backupsync` detaches `scripts/backup-sync.sh` as root
+  (setsid + stdio to /dev/null). Lock dir `run/backup.lock` serializes runs;
+  progress lands in `run/backup-status.json` for `GET /api/backup/status`.
+- One cryfs-batch repo per (bucket, volume) under
+  `/usr/local/flynas/backup/{blocks,cfg}/<bucket_id>/<volume>`; "Backup now"
+  backs up all mounted volumes, then rclone-syncs per volume. The block store
+  is chowned `www:flynas` after each run so `GET /api/restore/browse` can run
+  `cryfs-batch list` directly as www (no helper round-trip).
+- Endpoints starting with `/` are local directories (rclone local backend) —
+  used for offline end-to-end testing; real S3 uses an rclone `:s3,...:`
+  connection string built from the bucket row.
+- `s3_buckets.name` doubles as the remote bucket name; secrets are stored
+  plaintext in the DB (664 www:flynas) — the "encrypted at rest" idea was
+  dropped since the key would have to live next to the DB anyway. GET /api/s3
+  redacts `secret_key` and `cryfs_password` (returns `has_password`).
+- `/api/restore/share` deferred to the Seafile/VM phase (step 10/11);
+  `/api/config/export|import` deferred to step 13 (§5.2).
+- Verified end-to-end on h2dev: snapshot CRUD + schedule, hourly cron
+  (h/d/w/y promotion, retention prune of a faked 30h-old snapshot, no dup
+  daily/weekly/yearly on re-run), backup sync (14 blocks of exactly 32,808 B),
+  incremental re-sync (+1 block), restore-browse, and a full
+  `cryfs-batch restore` from the synced copy (`cmp` clean against source).
 
 ### 2.7 VM API
 
@@ -503,7 +538,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Remaining pages are placeholders.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303 (STRING_POOL_SIZE now 98304). Remaining pages (Monitoring, VMs, Apps, Settings) are placeholders.
 
 ---
 
@@ -576,7 +611,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 | 6 | Network API + UI | 3 | ✅ done |
 | 7 | Accounts API + UI | 3 | ✅ done |
 | 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | ✅ done |
-| 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | — |
+| 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | ✅ done (live-source backup; restore/share + config import/export deferred) |
 | 10 | VM API + UI (QEMU/NVMM) | 8 | — |
 | 11 | App templates + one-click install | 10 | — |
 | 12 | Monitoring system + UI | 3 | — |
@@ -595,6 +630,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Progress Log
 
+- **2026-06-12 (evening)**: Step 9 done. Backup API (snapshots CRUD + schedule, S3 bucket CRUD, sync trigger + status, restore browse), helper snapcreate/snapdelete/snaplist/backupsync, `scripts/backup-sync.sh`, `cron/hourly-snapshots.sh`, Backup page in Clay UI, `tools/uitest/test-backup.mjs`. cryfs-batch cross-compiles for DragonFly (`GOOS=dragonfly go build`, static binary); rclone installed from pkg. **Kernel panic found**: mounting a snapshot PFS of a multi-volume HAMMER2 panics 6.4 (`hammer2_base_delete` during flush) — backup now reads the live mountpoint instead; needs a kernel-side fix before point-in-time backups (candidate bug for the hammer2-raid6 harness). Gotchas: (1) daemons spawned via the setuid helper inherited nginx's listen sockets — after a netif restart, dhclient held ports 80/443 and nginx couldn't start; fixed with `closefrom(3)` in the helper, stale deployments need `pkill dhclient`; (2) cjson escapes `/` and randomizes key order — the sync job file is key=value lines, not JSON; (3) Clay UI: a button whose label duplicates a nearby title breaks text-targeted UI tests (S3 card title renamed "New bucket"); (4) panic recovery: QMP `system_reset`, then fsck `/dev/vbd0s1d` from single-user over the serial socket. Test volume/users/buckets removed from h2dev afterwards (fstab discipline).
 - **2026-06-12 (later)**: Step 6 done. Network API (config/timezone/ntp) + helper commands (`netconfig`/`timezone`/`ntp`) + Network page in Clay UI. Verified on h2dev: DHCP→static→DHCP round-trip survives netif restart (slirp re-DHCPs), timezone EDT/UTC round-trip, traversal rejected, NTP enable/disable. Plan changes: dntpd not ntpd (server in rc.conf `dntpd_flags`); `/etc/localtime` is a copy not symlink (+ `/var/db/zoneinfo`). Gotchas: `service X stop` refuses once `X_enable="NO"` — use `onestop`; UI tests need preconditions seeded (tank volume, testuser1/testgrp) and poll-based waits (newfs can take 20s, /api/disks smartctl probes are slow).
 - **2026-06-12**: Steps 7+8 done. Accounts: keypair endpoint, Accounts page (users/groups/membership/SSH/keygen-download), verified in headless Chrome. Storage: helper volcreate/voldestroy/scrub/vollist, storage API, Storage page (disk picker, create/delete/scrub), verified end-to-end on vbd1–vbd4. Found+fixed: (1) user/group DELETE silently failed via user_groups FK (no cascade); (2) **LuaJIT `pipe:close()` on this platform always returns true** — all helper exit codes were swallowed; exec.lua/users.lua now append an in-band `EXIT:<code>` marker. Plan change: no `volume-add`/`volume-del` on DragonFly 6.4 (open question 3 resolved). Test volumes removed from h2dev afterwards — fstab entries pointing at harness scratch disks would break boot when the harness regenerates them.
 - **2026-06-11**: Login/setup flow in Clay UI — auth screens in C, state machine + keyboard input in JS, public `GET /api/setup/status`, TOTP QR code on setup screen (vendored qrcode-generator). Fixed `is_setup_done` error swallowing. Verified end-to-end in headless Chrome against h2dev (login → TOTP → dashboard; QR decodes to correct otpauth URI).

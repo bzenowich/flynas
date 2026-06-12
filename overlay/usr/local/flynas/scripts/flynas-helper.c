@@ -482,6 +482,89 @@ static int do_voldestroy(const char *label)
     return 0;
 }
 
+/* ---- Snapshots ------------------------------------------------ */
+
+/* Snapshot PFS names are forced to a "snap-" prefix so snapdelete
+ * can never address a volume's root PFS. */
+static int valid_snapname(const char *s)
+{
+    size_t len;
+
+    if (!s || strncmp(s, "snap-", 5) != 0)
+        return 0;
+    len = strlen(s);
+    if (len < 6 || len > 64)
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!(islower((unsigned char)c) || isdigit((unsigned char)c) ||
+              c == '-' || c == '.'))
+            return 0;
+    }
+    return 1;
+}
+
+static void volume_mountpoint(const char *label, char *buf, size_t size)
+{
+    struct statfs sb;
+
+    snprintf(buf, size, "%s/%s", DATA_ROOT, label);
+    if (statfs(buf, &sb) != 0 || strcmp(sb.f_mntonname, buf) != 0)
+        die("volume not mounted");
+}
+
+static int do_snapcreate(const char *label, const char *snapname)
+{
+    char mountpoint[256];
+
+    volume_mountpoint(label, mountpoint, sizeof(mountpoint));
+    char *args[] = { "hammer2", "snapshot", mountpoint, (char *)snapname, NULL };
+    return run(HAMMER2_CMD, args);
+}
+
+static int do_snapdelete(const char *label, const char *snapname)
+{
+    char mountpoint[256];
+
+    volume_mountpoint(label, mountpoint, sizeof(mountpoint));
+    char *args[] = { "hammer2", "-s", mountpoint, "pfs-delete",
+                     (char *)snapname, NULL };
+    return run(HAMMER2_CMD, args);
+}
+
+static int do_snaplist(const char *label)
+{
+    char mountpoint[256];
+
+    volume_mountpoint(label, mountpoint, sizeof(mountpoint));
+    char *args[] = { "hammer2", "-s", mountpoint, "pfs-list", NULL };
+    return run(HAMMER2_CMD, args);
+}
+
+/* backupsync: detach scripts/backup-sync.sh as root. The job spec
+ * is read by the script from RUN_DIR/backup-job.json; concurrency
+ * is the script's problem (status-file lock). */
+#define BACKUP_SCRIPT "/usr/local/flynas/scripts/backup-sync.sh"
+
+static int do_backupsync(void)
+{
+    pid_t pid = fork();
+
+    if (pid < 0)
+        die("fork failed");
+    if (pid == 0) {
+        setsid();
+        /* Detach stdio so nginx's pipe read returns immediately */
+        freopen("/dev/null", "r", stdin);
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+        char *args[] = { "sh", BACKUP_SCRIPT, NULL };
+        execv("/bin/sh", args);
+        _exit(127);
+    }
+    return 0;
+}
+
 /* ---- Network / time configuration ---------------------------- */
 
 /* Validate interface name: ^[a-z]+[0-9]+$ (vtnet0, em0, re0) */
@@ -687,6 +770,11 @@ int main(int argc, char *argv[])
     clearenv();
     setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin", 1);
 
+    /* Drop inherited descriptors (nginx listen sockets!) so daemons
+     * spawned below (dhclient, dntpd, backup-sync.sh) can't hold
+     * ports 80/443 open after an nginx restart */
+    closefrom(3);
+
     const char *cmd = argv[1];
 
     if (strcmp(cmd, "useradd") == 0) {
@@ -839,6 +927,37 @@ int main(int argc, char *argv[])
         snprintf(mountpoint, sizeof(mountpoint), "%s/%s", DATA_ROOT, argv[2]);
         char *args[] = { "hammer2", "-s", mountpoint, "volume-list", NULL };
         rc = run(HAMMER2_CMD, args);
+
+    } else if (strcmp(cmd, "snapcreate") == 0) {
+        if (argc != 4)
+            die("usage: flynas-helper snapcreate <label> <snapname>");
+        if (!valid_name(argv[2]))
+            die("invalid volume label");
+        if (!valid_snapname(argv[3]))
+            die("invalid snapshot name");
+        rc = do_snapcreate(argv[2], argv[3]);
+
+    } else if (strcmp(cmd, "snapdelete") == 0) {
+        if (argc != 4)
+            die("usage: flynas-helper snapdelete <label> <snapname>");
+        if (!valid_name(argv[2]))
+            die("invalid volume label");
+        if (!valid_snapname(argv[3]))
+            die("invalid snapshot name");
+        rc = do_snapdelete(argv[2], argv[3]);
+
+    } else if (strcmp(cmd, "snaplist") == 0) {
+        /* Read-only: PFS list including snapshots */
+        if (argc != 3)
+            die("usage: flynas-helper snaplist <label>");
+        if (!valid_name(argv[2]))
+            die("invalid volume label");
+        rc = do_snaplist(argv[2]);
+
+    } else if (strcmp(cmd, "backupsync") == 0) {
+        if (argc != 2)
+            die("usage: flynas-helper backupsync");
+        rc = do_backupsync();
 
     } else if (strcmp(cmd, "netconfig") == 0) {
         if (argc < 4)

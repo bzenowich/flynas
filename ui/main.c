@@ -57,9 +57,9 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 #define MAX_ROWS 16
 // 0..12287 dashboard (reset each poll), 12288..16383 auth strings,
 // 16384..32767 QR code data URL, 32768..49151 accounts page,
-// 49152..65535 storage page, 65536..81919 network page — keep in
-// sync with index.html
-#define STRING_POOL_SIZE 81920
+// 49152..65535 storage page, 65536..81919 network page,
+// 81920..98303 backup page — keep in sync with index.html
+#define STRING_POOL_SIZE 98304
 
 typedef struct {
     Clay_String name;
@@ -239,6 +239,14 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_NET_APPLY       16
 #define PACT_TZ_SAVE         17
 #define PACT_NTP_SAVE        18
+#define PACT_SNAP_CREATE     19
+#define PACT_SNAP_DELETE     20
+#define PACT_SNAP_SCHED      21
+#define PACT_S3_ADD          22
+#define PACT_S3_DELETE       23
+#define PACT_S3_BACKUP       24
+#define PACT_S3_BROWSE       25
+#define PACT_BROWSE_NAV      26
 // Low 6 bits = action code, remaining bits = row id
 #define PACT_PACK(action, arg) ((action) | ((arg) << 6))
 
@@ -449,6 +457,173 @@ void HandleVolDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, voi
             storPendingDeleteVol = 0;
         } else {
             storPendingDeleteVol = vid;
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// Backup page state, same JS-feeds-C pattern
+// ---------------------------------------------------------------
+#define MAX_SNAPS 32
+
+typedef struct {
+    int id;
+    Clay_String name;
+} BakVolRow;
+
+typedef struct {
+    int id;
+    Clay_String volume;
+    Clay_String name;
+    Clay_String retention;   // "manual", "hourly", ...
+    Clay_String created;
+} BakSnapRow;
+
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String endpoint;
+} BakBucketRow;
+
+typedef struct {
+    Clay_String label;       // "name  (size)  mtime" formatted in JS
+    bool dir;
+} BrowseRow;
+
+static BakVolRow bakVols[MAX_ROWS];
+static int bakVolCount = 0;
+static BakSnapRow bakSnaps[MAX_SNAPS];
+static int bakSnapCount = 0;
+static BakBucketRow bakBuckets[MAX_ROWS];
+static int bakBucketCount = 0;
+static bool bakSchedEnabled = true;
+static Clay_String bakStatus;          // backup sync status line
+static bool bakRunning = false;
+// S3 add form: name, endpoint, access key, secret, cryfs password
+static Clay_String bakInputs[5];
+static Clay_String bakError, bakInfo;
+static BrowseRow browseRows[MAX_SNAPS];
+static int browseRowCount = 0;
+static Clay_String browsePath;
+static bool browseOpen = false;
+static int bakPendingDeleteSnap = 0;
+static int bakPendingDeleteBucket = 0;
+
+CLAY_WASM_EXPORT("ClearBakVolumes") void ClearBakVolumes(void) {
+    bakVolCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddBakVolume")
+void AddBakVolume(int id, uint32_t nameOff, uint32_t nameLen) {
+    if (bakVolCount >= MAX_ROWS) return;
+    bakVols[bakVolCount++] = (BakVolRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+    };
+}
+
+CLAY_WASM_EXPORT("ClearSnapshots") void ClearSnapshots(void) {
+    bakSnapCount = 0;
+    bakPendingDeleteSnap = 0;
+}
+
+CLAY_WASM_EXPORT("AddSnapshot")
+void AddSnapshot(int id,
+                 uint32_t volOff, uint32_t volLen,
+                 uint32_t nameOff, uint32_t nameLen,
+                 uint32_t retOff, uint32_t retLen,
+                 uint32_t createdOff, uint32_t createdLen) {
+    if (bakSnapCount >= MAX_SNAPS) return;
+    bakSnaps[bakSnapCount++] = (BakSnapRow) {
+        .id = id,
+        .volume = poolString(volOff, volLen),
+        .name = poolString(nameOff, nameLen),
+        .retention = poolString(retOff, retLen),
+        .created = poolString(createdOff, createdLen),
+    };
+}
+
+CLAY_WASM_EXPORT("ClearBuckets") void ClearBuckets(void) {
+    bakBucketCount = 0;
+    bakPendingDeleteBucket = 0;
+}
+
+CLAY_WASM_EXPORT("AddBucket")
+void AddBucket(int id, uint32_t nameOff, uint32_t nameLen,
+               uint32_t epOff, uint32_t epLen) {
+    if (bakBucketCount >= MAX_ROWS) return;
+    bakBuckets[bakBucketCount++] = (BakBucketRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .endpoint = poolString(epOff, epLen),
+    };
+}
+
+CLAY_WASM_EXPORT("SetBakState")
+void SetBakState(bool schedEnabled, bool running,
+                 uint32_t statusOff, uint32_t statusLen) {
+    bakSchedEnabled = schedEnabled;
+    bakRunning = running;
+    bakStatus = poolString(statusOff, statusLen);
+}
+
+CLAY_WASM_EXPORT("SetBakInputs")
+void SetBakInputs(uint32_t o0, uint32_t l0, uint32_t o1, uint32_t l1,
+                  uint32_t o2, uint32_t l2, uint32_t o3, uint32_t l3,
+                  uint32_t o4, uint32_t l4) {
+    bakInputs[0] = poolString(o0, l0);
+    bakInputs[1] = poolString(o1, l1);
+    bakInputs[2] = poolString(o2, l2);
+    bakInputs[3] = poolString(o3, l3);
+    bakInputs[4] = poolString(o4, l4);
+}
+
+CLAY_WASM_EXPORT("SetBakMsg")
+void SetBakMsg(uint32_t errOff, uint32_t errLen,
+               uint32_t infoOff, uint32_t infoLen) {
+    bakError = poolString(errOff, errLen);
+    bakInfo = poolString(infoOff, infoLen);
+}
+
+CLAY_WASM_EXPORT("ClearBrowse") void ClearBrowse(void) {
+    browseRowCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddBrowseRow")
+void AddBrowseRow(uint32_t labelOff, uint32_t labelLen, bool dir) {
+    if (browseRowCount >= MAX_SNAPS) return;
+    browseRows[browseRowCount++] = (BrowseRow) {
+        .label = poolString(labelOff, labelLen),
+        .dir = dir,
+    };
+}
+
+CLAY_WASM_EXPORT("SetBrowsePath")
+void SetBrowsePath(uint32_t off, uint32_t len, bool open) {
+    browsePath = poolString(off, len);
+    browseOpen = open;
+}
+
+void HandleSnapDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int sid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (bakPendingDeleteSnap == sid) {
+            pendingPageAction = PACT_PACK(PACT_SNAP_DELETE, sid);
+            bakPendingDeleteSnap = 0;
+        } else {
+            bakPendingDeleteSnap = sid;
+        }
+    }
+}
+
+void HandleBucketDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int bid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (bakPendingDeleteBucket == bid) {
+            pendingPageAction = PACT_PACK(PACT_S3_DELETE, bid);
+            bakPendingDeleteBucket = 0;
+        } else {
+            bakPendingDeleteBucket = bid;
         }
     }
 }
@@ -1151,6 +1326,207 @@ void NetworkPage(void) {
     }
 }
 
+// ---------------------------------------------------------------
+// Backup page
+// ---------------------------------------------------------------
+void SnapshotsCard(void) {
+    CARD("SnapshotsCard") {
+        CLAY(CLAY_ID("SnapHead"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CardTitle(CLAY_STRING("Snapshots"));
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("SnapSched"),
+                bakSchedEnabled ? CLAY_STRING("Auto-snapshot on")
+                                : CLAY_STRING("Auto-snapshot off"),
+                bakSchedEnabled ? COLOR_GOOD : COLOR_MUTED, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_SNAP_SCHED, 0));
+        }
+        for (int i = 0; i < bakVolCount; i++) {
+            CLAY(CLAY_IDI("SnapVol", bakVols[i].id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 10,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY_TEXT(bakVols[i].name, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 16, .textColor = COLOR_TEXT }));
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                SmallButton(CLAY_IDI("SnapNow", bakVols[i].id), CLAY_STRING("Snapshot now"),
+                    COLOR_ACCENT, HandlePageButton,
+                    (void *)(intptr_t)PACT_PACK(PACT_SNAP_CREATE, bakVols[i].id));
+            }
+        }
+        if (bakVolCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No volumes — create one on the Storage page"),
+                CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        } else if (bakSnapCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No snapshots yet"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < bakSnapCount; i++) {
+            BakSnapRow *s = &bakSnaps[i];
+            CLAY(CLAY_IDI("SnapRow", s->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 10,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY_TEXT(s->volume, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_MUTED }));
+                CLAY_TEXT(s->name, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT }));
+                CLAY_TEXT(s->retention, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_ACCENT }));
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                CLAY_TEXT(s->created, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+                SmallButton(CLAY_IDI("SnapDel", s->id),
+                    bakPendingDeleteSnap == s->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                    COLOR_BAD, HandleSnapDelete, (void *)(intptr_t)s->id);
+            }
+        }
+    }
+}
+
+void S3Card(void) {
+    CLAY(CLAY_ID("S3Card"), {
+        .layout = {
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .sizing = { .width = CLAY_SIZING_FIXED(440) },
+            .padding = CLAY_PADDING_ALL(20),
+            .childGap = 12,
+        },
+        .backgroundColor = COLOR_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+    }) {
+        CardTitle(CLAY_STRING("Offsite backup (S3)"));
+        if (bakBucketCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No buckets configured"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < bakBucketCount; i++) {
+            BakBucketRow *b = &bakBuckets[i];
+            CLAY(CLAY_IDI("BucketRow", b->id), { .layout = {
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 6,
+            } }) {
+                CLAY(CLAY_IDI("BucketHead", b->id), { .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 10,
+                    .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                } }) {
+                    CLAY_TEXT(b->name, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_MONO, .fontSize = 16, .textColor = COLOR_TEXT }));
+                    CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                    CLAY_TEXT(b->endpoint, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                }
+                CLAY(CLAY_IDI("BucketBtns", b->id), { .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 10,
+                } }) {
+                    SmallButton(CLAY_IDI("BucketSync", b->id),
+                        bakRunning ? CLAY_STRING("Running...") : CLAY_STRING("Backup now"),
+                        bakRunning ? COLOR_MUTED : COLOR_ACCENT, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_S3_BACKUP, b->id));
+                    SmallButton(CLAY_IDI("BucketBrowse", b->id), CLAY_STRING("Browse"),
+                        COLOR_ACCENT, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_S3_BROWSE, b->id));
+                    CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                    SmallButton(CLAY_IDI("BucketDel", b->id),
+                        bakPendingDeleteBucket == b->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                        COLOR_BAD, HandleBucketDelete, (void *)(intptr_t)b->id);
+                }
+            }
+        }
+        if (bakStatus.length > 0) {
+            CLAY_TEXT(bakStatus, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 14,
+                .textColor = bakRunning ? COLOR_WARN : COLOR_MUTED }));
+        }
+        CardTitle(CLAY_STRING("New bucket"));
+        LabeledInput(CLAY_STRING("Bucket"), CLAY_ID("BakName"),
+            bakInputs[0], CLAY_STRING("my-backups"), 8);
+        LabeledInput(CLAY_STRING("Endpoint"), CLAY_ID("BakEndpoint"),
+            bakInputs[1], CLAY_STRING("s3.amazonaws.com or /local/dir"), 9);
+        LabeledInput(CLAY_STRING("Access key"), CLAY_ID("BakAccess"),
+            bakInputs[2], CLAY_STRING("(empty for local dir)"), 10);
+        LabeledInput(CLAY_STRING("Secret key"), CLAY_ID("BakSecret"),
+            bakInputs[3], CLAY_STRING(""), 11);
+        LabeledInput(CLAY_STRING("Password"), CLAY_ID("BakPassword"),
+            bakInputs[4], CLAY_STRING("encryption password (min 8)"), 12);
+        CLAY(CLAY_ID("BakAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 10 } }) {
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("BakAddBtn"), CLAY_STRING("Add bucket"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_S3_ADD, 0));
+        }
+    }
+}
+
+void BrowseCard(void) {
+    CARD("BrowseCard") {
+        CLAY(CLAY_ID("BrowseHead"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CardTitle(CLAY_STRING("Restore browser"));
+            CLAY_TEXT(browsePath, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT }));
+        }
+        if (browseRowCount == 0) {
+            CLAY_TEXT(CLAY_STRING("(empty)"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 15, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < browseRowCount; i++) {
+            BrowseRow *r = &browseRows[i];
+            CLAY(CLAY_IDI("BrowseRow", i), {
+                .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 8,
+                },
+                .backgroundColor = (r->dir && Clay_Hovered()) ? COLOR_NAV_HOVER : COLOR_CARD,
+                .userData = FrameAllocateCustomData((CustomHTMLData) {
+                    .cursorPointer = r->dir }),
+            }) {
+                if (r->dir) {
+                    Clay_OnHover(HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_BROWSE_NAV, i));
+                }
+                CLAY_TEXT(r->label, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 15,
+                    .textColor = r->dir ? COLOR_ACCENT : COLOR_TEXT,
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                }));
+            }
+        }
+    }
+}
+
+void BackupPage(void) {
+    CLAY(CLAY_ID("BackupRow"), { .layout = {
+        .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
+        SnapshotsCard();
+        S3Card();
+    }
+    if (browseOpen) {
+        BrowseCard();
+    }
+    if (bakError.length > 0) {
+        CLAY_TEXT(bakError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+    }
+    if (bakInfo.length > 0) {
+        CLAY_TEXT(bakInfo, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_GOOD }));
+    }
+}
+
 void AccountsPage(void) {
     CLAY(CLAY_ID("AccountsRow"), { .layout = {
         .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
@@ -1401,6 +1777,8 @@ Clay_RenderCommandArray CreateLayout(float deltaTime) {
                     AccountsPage();
                 } else if (activePage == 4) {
                     StoragePage();
+                } else if (activePage == 5) {
+                    BackupPage();
                 } else {
                     PlaceholderPage();
                 }

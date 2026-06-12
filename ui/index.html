@@ -289,6 +289,7 @@
     const ACCOUNTS_POOL_BASE = 32768;
     const STOR_POOL_BASE = 49152;
     const NET_POOL_BASE = 65536;
+    const BAK_POOL_BASE = 81920;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -457,6 +458,8 @@
                 handleStorageKey(event);
             } else if (page === PAGE_NETWORK) {
                 handleNetworkKey(event);
+            } else if (page === PAGE_BACKUP) {
+                handleBackupKey(event);
             }
             return;
         }
@@ -607,6 +610,10 @@
 
     function handlePageAction(packed) {
         const action = packed & 63, arg = packed >> 6;
+        if (action >= 19) {
+            handleBackupAction(action, arg);
+            return;
+        }
         if (action >= 15) {
             handleNetworkAction(action, arg);
             return;
@@ -958,6 +965,245 @@
             netInputs[key] += event.key;
             netArmed = false;
             syncNetwork();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
+    // ----------------------------------------------------------------
+    // Backup page: snapshots, S3 bucket configs, sync status polling,
+    // restore browser. The browser's pseudo-root lists volumes as
+    // directories; descending into one browses that volume's backup.
+    // ----------------------------------------------------------------
+    const PAGE_BACKUP = 5;
+    const PACT_SNAP_CREATE = 19, PACT_SNAP_DELETE = 20, PACT_SNAP_SCHED = 21,
+          PACT_S3_ADD = 22, PACT_S3_DELETE = 23, PACT_S3_BACKUP = 24,
+          PACT_S3_BROWSE = 25, PACT_BROWSE_NAV = 26;
+
+    let bakVolumes = [], bakSnaps = [], bakBuckets = [];
+    let bakSched = true;
+    let bakStatus = { state: 'idle' };
+    // focus indices 8..12 (see S3Card in main.c)
+    let bakInputs = { name: '', endpoint: '', access: '', secret: '', password: '' };
+    let bakError = '', bakInfo = '';
+    let browseOpen = false, browseBucket = 0, browseVolume = '', browsePath = '/';
+    let browseRowDefs = [];   // aligned with rows pushed to C
+    let bakStatusTimer = null;
+
+    function bakStatusLine() {
+        if (bakStatus.state === 'running')
+            return 'Backup running — ' + (bakStatus.phase || '?')
+                + (bakStatus.volume ? ' (' + bakStatus.volume + ')' : '');
+        if (bakStatus.state === 'error')
+            return 'Backup failed: ' + (bakStatus.detail || bakStatus.phase || '?');
+        if (bakStatus.state === 'done')
+            return 'Last backup completed ' + (bakStatus.updated_at || '');
+        return '';
+    }
+
+    function syncBackup() {
+        let off = BAK_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 160));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearBakVolumes();
+        for (const v of bakVolumes) {
+            const name = write(v.name);
+            instance.exports.AddBakVolume(v.id, name.off, name.len);
+        }
+        instance.exports.ClearSnapshots();
+        for (const s of bakSnaps.slice(0, 32)) {
+            const vol = write(s.volume);
+            const name = write(s.name);
+            const ret = write(s.retention || 'manual');
+            const created = write(s.created_at || '');
+            instance.exports.AddSnapshot(s.id, vol.off, vol.len, name.off, name.len,
+                ret.off, ret.len, created.off, created.len);
+        }
+        instance.exports.ClearBuckets();
+        for (const b of bakBuckets) {
+            const name = write(b.name);
+            const ep = write(b.endpoint);
+            instance.exports.AddBucket(b.id, name.off, name.len, ep.off, ep.len);
+        }
+        const status = write(bakStatusLine());
+        instance.exports.SetBakState(bakSched ? 1 : 0,
+            bakStatus.state === 'running' ? 1 : 0, status.off, status.len);
+        const inName = write(bakInputs.name), inEp = write(bakInputs.endpoint),
+              inAk = write(bakInputs.access),
+              inSk = write('•'.repeat(bakInputs.secret.length)),
+              inPw = write('•'.repeat(bakInputs.password.length));
+        instance.exports.SetBakInputs(inName.off, inName.len, inEp.off, inEp.len,
+            inAk.off, inAk.len, inSk.off, inSk.len, inPw.off, inPw.len);
+        const err = write(bakError), info = write(bakInfo);
+        instance.exports.SetBakMsg(err.off, err.len, info.off, info.len);
+        instance.exports.ClearBrowse();
+        for (const r of browseRowDefs.slice(0, 32)) {
+            const label = write(r.label);
+            instance.exports.AddBrowseRow(label.off, label.len, r.dir ? 1 : 0);
+        }
+        const bp = write(browseVolume ? browseVolume + browsePath : '');
+        instance.exports.SetBrowsePath(bp.off, bp.len, browseOpen ? 1 : 0);
+    }
+
+    async function loadBackup() {
+        try {
+            const [vols, snaps, sched, s3, status] = await Promise.all([
+                getJSON('/api/volumes'), getJSON('/api/snapshots'),
+                getJSON('/api/snapshots/schedule'), getJSON('/api/s3'),
+                getJSON('/api/backup/status')]);
+            bakVolumes = Array.isArray(vols.volumes) ? vols.volumes : [];
+            bakSnaps = Array.isArray(snaps.snapshots) ? snaps.snapshots : [];
+            bakBuckets = Array.isArray(s3.buckets) ? s3.buckets : [];
+            bakSched = !!sched.enabled;
+            bakStatus = status;
+            watchBakStatus();
+        } catch (err) {
+            bakError = 'load failed: ' + err;
+        }
+        syncBackup();
+    }
+
+    function watchBakStatus() {
+        if (bakStatus.state !== 'running' || bakStatusTimer) return;
+        bakStatusTimer = setTimeout(async () => {
+            bakStatusTimer = null;
+            try {
+                const prev = bakStatus.state;
+                bakStatus = await getJSON('/api/backup/status');
+                if (bakStatus.state === 'running') watchBakStatus();
+                else if (prev === 'running') { loadBackup(); return; }
+            } catch (e) {}
+            syncBackup();
+        }, 2000);
+    }
+
+    async function backupMutate(promise, okMsg) {
+        bakError = '';
+        bakInfo = '';
+        try {
+            const { ok, data } = await promise;
+            if (!ok) bakError = data.error || 'request failed';
+            else if (okMsg) bakInfo = okMsg;
+        } catch (e) {
+            bakError = 'network error';
+        }
+        await loadBackup();
+    }
+
+    function browseVolumeList() {
+        browseVolume = '';
+        browsePath = '/';
+        browseRowDefs = bakVolumes.map(v => ({
+            label: v.name + '/', dir: true, volume: v.name, path: '/' }));
+    }
+
+    async function browseLoad(volume, path) {
+        try {
+            const data = await getJSON('/api/restore/browse?bucket_id=' + browseBucket
+                + '&volume=' + encodeURIComponent(volume)
+                + '&path=' + encodeURIComponent(path));
+            browseVolume = volume;
+            browsePath = data.path || path;
+            const entries = Array.isArray(data.entries) ? data.entries : [];
+            browseRowDefs = [{ label: '../', dir: true, up: true }];
+            for (const e of entries) {
+                browseRowDefs.push({
+                    label: e.name + (e.dir ? '/' : '') +
+                        (e.size ? '  (' + e.size + ')' : '') +
+                        (e.mtime ? '  ' + e.mtime : ''),
+                    dir: !!e.dir, volume, path: e.path,
+                });
+            }
+            bakError = '';
+        } catch (err) {
+            bakError = 'browse failed: ' + err;
+        }
+        syncBackup();
+    }
+
+    function handleBackupAction(action, arg) {
+        switch (action) {
+            case PACT_SNAP_CREATE:
+                backupMutate(postJSON('/api/snapshots', { volume_id: arg }), 'Snapshot created');
+                break;
+            case PACT_SNAP_DELETE:
+                backupMutate(sendJSON('DELETE', '/api/snapshots/' + arg));
+                break;
+            case PACT_SNAP_SCHED:
+                backupMutate(sendJSON('PUT', '/api/snapshots/schedule', { enabled: !bakSched }));
+                break;
+            case PACT_S3_ADD: {
+                if (!bakInputs.name || !bakInputs.endpoint || !bakInputs.password) {
+                    bakError = 'bucket, endpoint and password are required';
+                    syncBackup();
+                    break;
+                }
+                const body = { name: bakInputs.name, endpoint: bakInputs.endpoint,
+                    access_key: bakInputs.access, secret_key: bakInputs.secret,
+                    cryfs_password: bakInputs.password };
+                bakInputs = { name: '', endpoint: '', access: '', secret: '', password: '' };
+                backupMutate(postJSON('/api/s3', body), 'Bucket added');
+                break;
+            }
+            case PACT_S3_DELETE:
+                if (browseBucket === arg) { browseOpen = false; browseRowDefs = []; }
+                backupMutate(sendJSON('DELETE', '/api/s3/' + arg));
+                break;
+            case PACT_S3_BACKUP:
+                if (bakStatus.state === 'running') break;
+                backupMutate(postJSON('/api/backup/sync', { bucket_id: arg }), 'Backup started');
+                break;
+            case PACT_S3_BROWSE:
+                if (browseOpen && browseBucket === arg) {
+                    browseOpen = false;
+                    browseRowDefs = [];
+                } else {
+                    browseBucket = arg;
+                    browseOpen = true;
+                    browseVolumeList();
+                }
+                syncBackup();
+                break;
+            case PACT_BROWSE_NAV: {
+                const row = browseRowDefs[arg];
+                if (!row || !row.dir) break;
+                if (row.up) {
+                    if (browsePath === '/' || browsePath === '') {
+                        browseVolumeList();
+                        syncBackup();
+                    } else {
+                        const parent = browsePath.replace(/\/[^/]+$/, '') || '/';
+                        browseLoad(browseVolume, parent);
+                    }
+                } else {
+                    browseLoad(row.volume, row.path);
+                }
+                break;
+            }
+        }
+    }
+
+    function handleBackupKey(event) {
+        if (accFocus < 8 || accFocus > 12) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const key = ['name', 'endpoint', 'access', 'secret', 'password'][accFocus - 8];
+        if (event.key === 'Enter') {
+            handleBackupAction(PACT_S3_ADD, 0);
+        } else if (event.key === 'Backspace') {
+            bakInputs[key] = bakInputs[key].slice(0, -1);
+            syncBackup();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && bakInputs[key].length < 128) {
+            bakInputs[key] += event.key;
+            syncBackup();
         } else {
             return;
         }
@@ -1396,6 +1642,7 @@
                 if (page === PAGE_ACCOUNTS) loadAccounts();
                 else if (page === PAGE_STORAGE) loadStorage();
                 else if (page === PAGE_NETWORK) loadNetwork();
+                else if (page === PAGE_BACKUP) loadBackup();
             }
             const pageAction = instance.exports.TakePageAction();
             if (pageAction) handlePageAction(pageAction);

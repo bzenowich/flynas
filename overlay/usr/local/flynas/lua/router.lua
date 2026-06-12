@@ -7,6 +7,7 @@ local settings_api = require("api.settings")
 local dashboard_api = require("api.dashboard")
 local storage_api = require("api.storage")
 local network_api = require("api.network")
+local backup_api = require("api.backup")
 
 local uri = ngx.var.uri
 local method = ngx.req.get_method()
@@ -132,6 +133,43 @@ local routes = {
         storage_api.create(read_body())
     end,
 
+    -- Backup
+    ["GET:snapshots"] = function()
+        backup_api.list_snapshots()
+    end,
+
+    ["POST:snapshots"] = function()
+        backup_api.create_snapshot(read_body())
+    end,
+
+    ["GET:snapshots/schedule"] = function()
+        backup_api.get_schedule()
+    end,
+
+    ["PUT:snapshots/schedule"] = function()
+        backup_api.set_schedule(read_body())
+    end,
+
+    ["GET:s3"] = function()
+        backup_api.list_s3()
+    end,
+
+    ["POST:s3"] = function()
+        backup_api.create_s3(read_body())
+    end,
+
+    ["POST:backup/sync"] = function()
+        backup_api.sync(read_body())
+    end,
+
+    ["GET:backup/status"] = function()
+        backup_api.status()
+    end,
+
+    ["GET:restore/browse"] = function()
+        backup_api.browse()
+    end,
+
     -- Network
     ["GET:network/config"] = function()
         network_api.get_config()
@@ -190,6 +228,9 @@ local pattern_routes = {
     { "DELETE", "^volumes/(%d+)$",               function(id) storage_api.delete(tonumber(id)) end },
     { "POST",   "^volumes/(%d+)/scrub$",         function(id) storage_api.scrub(tonumber(id)) end },
     { "PUT",    "^volumes/(%d+)/scrub/schedule$", function(id) storage_api.scrub_schedule(tonumber(id), read_body()) end },
+    { "DELETE", "^snapshots/(%d+)$",             function(id) backup_api.delete_snapshot(tonumber(id)) end },
+    { "PUT",    "^s3/(%d+)$",                    function(id) backup_api.update_s3(tonumber(id), read_body()) end },
+    { "DELETE", "^s3/(%d+)$",                    function(id) backup_api.delete_s3(tonumber(id)) end },
     { "GET",    "^groups/(%d+)$",                function(id) groups_api.get(tonumber(id)) end },
     { "PUT",    "^groups/(%d+)$",                function(id) groups_api.update(tonumber(id), read_body()) end },
     { "DELETE", "^groups/(%d+)$",                function(id) groups_api.delete(tonumber(id)) end },

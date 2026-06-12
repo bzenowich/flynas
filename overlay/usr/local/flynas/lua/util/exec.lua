@@ -91,6 +91,18 @@ function _M.vol_scrub(label)
     return run({ "scrub", label })
 end
 
+function _M.snap_create(label, snapname)
+    return run({ "snapcreate", label, snapname })
+end
+
+function _M.snap_delete(label, snapname)
+    return run({ "snapdelete", label, snapname })
+end
+
+function _M.backup_sync()
+    return run({ "backupsync" })
+end
+
 function _M.net_dhcp(iface)
     return run({ "netconfig", iface, "dhcp" })
 end
