@@ -1,5 +1,7 @@
 mnt
 *.qcow2
 *.iso
-tools/
+tools/*
+!tools/uitest/
+tools/uitest/node_modules/
 ui/reference/
