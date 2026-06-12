@@ -31,10 +31,13 @@ function _M.is_setup_done()
     if not conn then
         return nil, err
     end
-    local row = conn:query_one(
+    local row, query_err = conn:query_one(
         "SELECT id FROM users WHERE is_admin = 1 AND totp_enabled = 1 LIMIT 1"
     )
     conn:close()
+    if query_err then
+        return nil, query_err
+    end
     return row ~= nil
 end
 
