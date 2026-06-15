@@ -90,6 +90,7 @@ try {
     await page.keyboard.press('Enter');
     await sleep(1200);
     console.log('login: OK');
+    await page.evaluate(() => { window.__flynasPauseRefresh = true; });  // deterministic: no bg refresh during the test
 
     await clickText(page, 'Apps');
     if (!(await waitFor(page, 'App catalog'))) throw new Error('apps page did not load');

@@ -252,6 +252,69 @@ function _M.resume(id)
     json.response({ status = "running" })
 end
 
+-- GET /api/vms/:id/console  — WebSocket <-> QEMU serial unix socket.
+-- Two cosocket threads pump bytes each way; idle timeouts just loop so
+-- the console stays open. Ends when either side closes.
+function _M.console(id)
+    local conn = open_db()
+    local vm = conn:query_one("SELECT name FROM vms WHERE id = ?", id)
+    conn:close()
+    if not vm then
+        json.response({ error = "vm not found" }, 404)
+        return
+    end
+
+    local server = require("resty.websocket.server")
+    local wb, err = server:new{ timeout = 5000, max_payload_len = 65535 }
+    if not wb then
+        ngx.log(ngx.ERR, "ws handshake failed: ", err)
+        ngx.exit(444)
+        return
+    end
+
+    local sock = ngx.socket.tcp()
+    sock:settimeout(1000)
+    local ok, cerr = sock:connect("unix:" .. RUN_DIR .. "/vm-" .. vm.name .. ".serial")
+    if not ok then
+        wb:send_text("\r\n[console unavailable: " .. (cerr or "?") .. " — is the VM running?]\r\n")
+        wb:send_close()
+        return
+    end
+
+    local function ws_to_serial()
+        while true do
+            local data, typ, rerr = wb:recv_frame()
+            if data then
+                if typ == "close" then break end
+                if typ == "ping" then wb:send_pong()
+                elseif typ == "text" or typ == "binary" then sock:send(data) end
+            elseif rerr ~= "timeout" then
+                break   -- client gone
+            end
+        end
+    end
+
+    local function serial_to_ws()
+        while true do
+            local data, rerr = sock:receiveany(4096)
+            if data then
+                local bytes = wb:send_binary(data)
+                if not bytes then break end
+            elseif rerr ~= "timeout" then
+                break   -- serial closed (VM stopped)
+            end
+        end
+    end
+
+    local c1 = ngx.thread.spawn(ws_to_serial)
+    local c2 = ngx.thread.spawn(serial_to_ws)
+    ngx.thread.wait(c1, c2)
+    ngx.thread.kill(c1)
+    ngx.thread.kill(c2)
+    sock:close()
+    wb:send_close()
+end
+
 -- ---- Port forwards --------------------------------------------
 
 -- GET /api/vms/:id/forwards

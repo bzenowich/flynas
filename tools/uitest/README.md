@@ -32,6 +32,12 @@ Don't `pkill -f 'ssh … 8443'` to recycle the tunnel — the pattern
 matches the killer's own command line and takes out the shell
 (exit 144). Gate on `curl -ks https://localhost:8443/api/health`.
 
+Each test sets `window.__flynasPauseRefresh = true` after login so the
+pages' 5s auto-refresh can't rebuild the DOM mid-click/keystroke
+(otherwise multi-step forms flake). State still updates after actions
+(mutations reload explicitly). Form-fill steps also settle ~300ms
+between fields, and lifecycle buttons retry via `clickUntil`.
+
 Preconditions (seed via API before running, clean up after):
 
 - test-accounts: user `testuser1` + group `testgrp` must exist; user

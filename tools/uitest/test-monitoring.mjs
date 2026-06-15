@@ -101,6 +101,7 @@ try {
     await page.keyboard.press('Enter');
     await sleep(1200);
     console.log('login: OK');
+    await page.evaluate(() => { window.__flynasPauseRefresh = true; });  // deterministic: no bg refresh during the test
 
     await clickText(page, 'Monitoring');
     if (!(await waitFor(page, 'Notification channels')))
@@ -114,11 +115,13 @@ try {
     // Add a tcp monitor for 127.0.0.1:443 (cycle type http -> tcp)
     await clickText(page, 'name');               // monitor name input placeholder
     await page.keyboard.type('uitest-mon');
+    await sleep(300);
     await clickText(page, 'http');               // type cycle button -> tcp
     await sleep(300);
     if (!(await findText(page, 'tcp'))) throw new Error('type did not cycle to tcp');
     await clickText(page, 'https://host/ or host:port');
     await page.keyboard.type('127.0.0.1:443');
+    await sleep(300);
     await clickText(page, 'Add');
     if (!(await waitFor(page, 'uitest-mon'))) throw new Error('monitor not added');
     console.log('add monitor: OK');
@@ -150,8 +153,10 @@ try {
     // Add a webhook channel
     await clickText(page, 'channel name');
     await page.keyboard.type('uitest-chan');
+    await sleep(300);
     await clickText(page, 'email or webhook URL');
     await page.keyboard.type('https://example.com/hook');
+    await sleep(300);
     await clickText(page, 'Add channel');
     if (!(await waitFor(page, 'uitest-chan'))) throw new Error('channel not added');
     console.log('add channel: OK');

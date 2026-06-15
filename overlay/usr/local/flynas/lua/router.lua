@@ -296,6 +296,7 @@ local pattern_routes = {
     { "POST",   "^vms/(%d+)/stop$",              function(id) vms_api.stop(tonumber(id)) end },
     { "POST",   "^vms/(%d+)/suspend$",           function(id) vms_api.suspend(tonumber(id)) end },
     { "POST",   "^vms/(%d+)/resume$",            function(id) vms_api.resume(tonumber(id)) end },
+    { "GET",    "^vms/(%d+)/console$",           function(id) vms_api.console(tonumber(id)) end },
     { "GET",    "^vms/(%d+)/forwards$",          function(id) vms_api.list_forwards(tonumber(id)) end },
     { "POST",   "^vms/(%d+)/forwards$",          function(id) vms_api.add_forward(tonumber(id), read_body()) end },
     { "DELETE", "^forwards/(%d+)$",              function(id) vms_api.delete_forward(tonumber(id)) end },

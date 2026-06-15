@@ -269,6 +269,7 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_VM_SELECT       44
 #define PACT_FWD_ADD         45
 #define PACT_FWD_DELETE      46
+#define PACT_VM_CONSOLE      47
 // Low 6 bits = action code, remaining bits = row id
 #define PACT_PACK(action, arg) ((action) | ((arg) << 6))
 
@@ -2140,6 +2141,9 @@ void VmsCard(void) {
                     .fontId = FONT_ID_BODY, .fontSize = 14,
                     .textColor = VmStatusColor(v->status) }));
                 if (running) {
+                    SmallButton(CLAY_IDI("VmConsole", v->id), CLAY_STRING("Console"),
+                        COLOR_ACCENT, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VM_CONSOLE, v->id));
                     SmallButton(CLAY_IDI("VmSuspend", v->id), CLAY_STRING("Suspend"),
                         COLOR_ACCENT, HandlePageButton,
                         (void *)(intptr_t)PACT_PACK(PACT_VM_SUSPEND, v->id));

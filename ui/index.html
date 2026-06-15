@@ -1348,6 +1348,7 @@
                 clearInterval(monTimer); monTimer = null; return;
             }
             // Pause refresh right after an interaction (see watchVms).
+            if (window.__flynasPauseRefresh) return;
             if (recentlyInteracted()) return;
             if (accFocus >= 13 && accFocus <= 17) return;
             if (monInputs.name || monInputs.target || monInputs.interval ||
@@ -1482,7 +1483,7 @@
     const PACT_VM_CREATE = 36, PACT_VM_DELETE = 37, PACT_VM_START = 38,
           PACT_VM_STOP = 39, PACT_VM_SUSPEND = 40, PACT_VM_RESUME = 41;
     const PACT_VMNET_TOGGLE = 43, PACT_VM_SELECT = 44,
-          PACT_FWD_ADD = 45, PACT_FWD_DELETE = 46;
+          PACT_FWD_ADD = 45, PACT_FWD_DELETE = 46, PACT_VM_CONSOLE = 47;
     let vmnetEnabled = false;
     let vmSelected = 0, vmForwards = [];
     let fwdInputs = { host: '', guest: '' };   // focus 24, 25
@@ -1575,6 +1576,7 @@
             }
             // Don't rebuild the page right after an interaction — a
             // full rebuild can drop an in-flight click/keystroke.
+            if (window.__flynasPauseRefresh) return;
             if (recentlyInteracted()) return;
             if (accFocus >= 18 && accFocus <= 21) return;
             if (vmInputs.name || vmInputs.cpus || vmInputs.ram || vmInputs.disk) return;
@@ -1639,7 +1641,73 @@
             case PACT_FWD_DELETE:
                 vmsMutate(sendJSON('DELETE', '/api/forwards/' + arg));
                 break;
+            case PACT_VM_CONSOLE:
+                openConsole(arg);
+                break;
         }
+    }
+
+    // Serial console: a JS-managed full-screen overlay (outside Clay)
+    // bridging keystrokes/output over a WebSocket to the VM's serial.
+    function openConsole(id) {
+        const vm = vmList.find(v => v.id === id);
+        const name = vm ? vm.name : String(id);
+        const overlay = document.createElement('div');
+        overlay.id = 'consoleOverlay';
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#000;'
+            + 'display:flex;flex-direction:column;pointer-events:all;';
+        const bar = document.createElement('div');
+        bar.style.cssText = 'background:#1b1f2a;color:#e8eaed;font:14px sans-serif;'
+            + 'padding:6px 12px;display:flex;align-items:center;gap:12px;';
+        bar.textContent = 'Console: ' + name;
+        const spacer = document.createElement('div');
+        spacer.style.flex = '1';
+        const close = document.createElement('a');
+        close.textContent = 'Close';
+        close.style.cssText = 'color:#ff6b6b;cursor:pointer;pointer-events:all;';
+        bar.append(spacer, close);
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'flex:1;margin:0;padding:8px;overflow:auto;color:#d0d0d0;'
+            + "background:#000;font:13px 'SF Mono',Menlo,Consolas,monospace;white-space:pre-wrap;";
+        overlay.append(bar, pre);
+        document.body.append(overlay);
+
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = new WebSocket(proto + '://' + location.host + '/api/vms/' + id + '/console');
+        ws.binaryType = 'arraybuffer';
+        const dec = new TextDecoder('utf-8', { fatal: false });
+        ws.onmessage = (e) => {
+            const txt = typeof e.data === 'string' ? e.data : dec.decode(e.data, { stream: true });
+            pre.textContent += txt;
+            pre.scrollTop = pre.scrollHeight;
+        };
+        ws.onclose = () => { pre.textContent += '\r\n[disconnected]\r\n'; };
+
+        const onkey = (event) => {
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            let out = null;
+            if (event.key === 'Enter') out = '\r';
+            else if (event.key === 'Backspace') out = '\x7f';
+            else if (event.key === 'Tab') out = '\t';
+            else if (event.key === 'Escape') out = '\x1b';
+            else if (event.key === 'ArrowUp') out = '\x1b[A';
+            else if (event.key === 'ArrowDown') out = '\x1b[B';
+            else if (event.key === 'ArrowRight') out = '\x1b[C';
+            else if (event.key === 'ArrowLeft') out = '\x1b[D';
+            else if (event.key.length === 1) out = event.key;
+            if (out !== null) {
+                if (ws.readyState === 1) ws.send(out);
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        };
+        document.addEventListener('keydown', onkey, true);
+
+        close.onclick = () => {
+            document.removeEventListener('keydown', onkey, true);
+            try { ws.close(); } catch (e) {}
+            overlay.remove();
+        };
     }
 
     function handleVmsKey(event) {

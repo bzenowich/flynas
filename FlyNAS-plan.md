@@ -452,11 +452,20 @@ Inbound port-forwards are pf `rdr` rules in the `flynas-fwd` anchor:
 `DELETE /api/forwards/:id`, helper `pffwd <uplink>` rebuilds the anchor
 from a www-written CSV spec (each field re-validated in C — www can't
 inject raw pf). UI: VM rows show the IP and expand to manage forwards.
-**Still deferred:** `/api/vms/:id/console` serial WebSocket
-(`resty.websocket` available), automated guest OS install (ISO +
-unattended + post-install script), and true LAN-identity bridging of the
-physical NIC (real-hardware only — guests reach the LAN today via the
-host's port-forwards).
+**Serial console (2026-06-15):** `GET /api/vms/:id/console` upgrades to a
+WebSocket (`resty.websocket.server`) and proxies bytes both ways to the
+VM's serial unix socket via two `ngx.thread` cosocket pumps (idle
+timeouts loop so it stays open). UI: a "Console" button on running VMs
+opens a JS-managed full-screen terminal overlay (outside Clay) — `<pre>`
+output + keydown→WebSocket (Enter→CR, Backspace→DEL, arrows→ANSI). Real
+guest output needs `console=ttyS0` in the guest (BIOS POST isn't on
+serial with our flags); the WebSocket upgrade + the stopped-VM
+"unavailable" path are test-covered.
+
+**Still deferred:** automated guest OS install (ISO + unattended +
+post-install script), and true LAN-identity bridging of the physical NIC
+(real-hardware only — guests reach the LAN today via the host's
+port-forwards).
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -617,7 +626,7 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303. Monitoring page DONE — summary card (up/down/paused + 24h uptime), monitors card (status dot, type·target, uptime%/last-response, Pause/Resume, two-click delete, expandable per-monitor notification-channel checkboxes, add form with type-cycle button + interval), notification-channels card (add with type-cycle email/webhook + target, two-click delete); page live-refreshes every 5s; monitoring strings at 98304..114687 (STRING_POOL_SIZE now 114688); page actions 27..35. VMs page DONE — VM list (status dot, spec, lifecycle buttons that switch by state: Start/Delete when stopped, Suspend/Stop when running, Resume/Stop when suspended) + create form (name/vCPU/RAM/disk) + a "NAT network" toggle (flynas0); live-refreshes every 5s (paused for 3s after any interaction so the rebuild can't drop clicks/keystrokes); VM strings at 114688..131071 (STRING_POOL_SIZE now 131072); page actions 36..41. Apps page DONE — install catalog (one shared "install as" name + optional static-IP form, per-app rows with description/defaults + Install button); app strings at 131072..147455 (STRING_POOL_SIZE now 147456); page action 42. The VMs/Monitoring/Apps live-refresh pauses while a form field is focused or a form has unsaved content, so the 5s rebuild can't drop keystrokes. Remaining page (Settings) is a placeholder.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303. Monitoring page DONE — summary card (up/down/paused + 24h uptime), monitors card (status dot, type·target, uptime%/last-response, Pause/Resume, two-click delete, expandable per-monitor notification-channel checkboxes, add form with type-cycle button + interval), notification-channels card (add with type-cycle email/webhook + target, two-click delete); page live-refreshes every 5s; monitoring strings at 98304..114687 (STRING_POOL_SIZE now 114688); page actions 27..35. VMs page DONE — VM list (status dot, spec, lifecycle buttons that switch by state: Start/Delete when stopped, Suspend/Stop when running, Resume/Stop when suspended) + create form (name/vCPU/RAM/disk) + a "NAT network" toggle (flynas0); VM rows show the bridge IP and expand to add/remove port-forwards; running VMs have a "Console" button opening a JS serial-terminal overlay (outside Clay) over a WebSocket; live-refreshes every 5s (paused for 3s after any interaction, and fully pausable via `window.__flynasPauseRefresh` for deterministic UI tests); VM strings at 114688..131071 (STRING_POOL_SIZE now 131072); page actions 36..41. Apps page DONE — install catalog (one shared "install as" name + optional static-IP form, per-app rows with description/defaults + Install button); app strings at 131072..147455 (STRING_POOL_SIZE now 147456); page action 42. The VMs/Monitoring/Apps live-refresh pauses while a form field is focused or a form has unsaved content, so the 5s rebuild can't drop keystrokes. Remaining page (Settings) is a placeholder.
 
 ---
 
@@ -709,6 +718,18 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 
 ## Progress Log
 
+- **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
+  WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
+  unix socket with two `ngx.thread` cosocket pumps; UI "Console" button
+  opens a JS terminal overlay (outside Clay — `<pre>` + keydown→ws).
+  Verified: overlay open/close, WebSocket upgrade through nginx, and the
+  stopped-VM "console unavailable" path (test-vms). Real byte streaming
+  needs a guest with `console=ttyS0` (SeaBIOS POST isn't on serial with
+  `-vga none -display none`, and its one-shot output predates a late
+  connect). **UI-test determinism:** added a `window.__flynasPauseRefresh`
+  flag the tests set after login so the 5s auto-refresh never races
+  clicks/keystrokes; lifecycle clicks use a `clickUntil` retry and
+  form-fill steps settle ~300ms between fields. All four UI tests green.
 - **2026-06-14 (latest+2)**: Guest DHCP + port-forwards. dnsmasq on
   `flynas0` (started/stopped by the helper with the bridge) hands each VM
   a reserved `10.77.0.<100+id>` via a SIGHUP-reloaded dhcp-hostsfile that

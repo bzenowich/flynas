@@ -71,6 +71,16 @@ async function waitFor(page, text, opts, tries = 12) {
     return false;
 }
 
+// Click `label`, then wait for `expect`; retry the click if it was
+// dropped (the page's auto-refresh can eat a click between polls).
+async function clickUntil(page, label, expect, tries = 4) {
+    for (let i = 0; i < tries; i++) {
+        try { await clickText(page, label); } catch (e) { /* label gone = already flipped */ }
+        if (await waitFor(page, expect, {}, 4)) return true;
+    }
+    return false;
+}
+
 const browser = await puppeteer.launch({
     executablePath: '/usr/bin/google-chrome',
     headless: 'new',
@@ -89,6 +99,7 @@ try {
     await page.keyboard.press('Enter');
     await sleep(1200);
     console.log('login: OK');
+    await page.evaluate(() => { window.__flynasPauseRefresh = true; });  // deterministic: no bg refresh during the test
 
     await clickText(page, 'VMs');
     if (!(await waitFor(page, 'Virtual machines')))
@@ -160,32 +171,55 @@ try {
 
     // Start -> running (Suspend button appears once running)
     await sleep(500);
-    await clickText(page, 'Start');
-    if (!(await waitFor(page, 'Suspend', {}, 12)))
+    if (!(await clickUntil(page, 'Start', 'Suspend', 5)))
         throw new Error('VM did not reach running (no Suspend button)');
     await page.screenshot({ path: '/tmp/flynas-uitest/vms-2.png' });
     console.log('start VM (QEMU/NVMM): OK');
 
-    // Suspend -> Resume
-    await sleep(800);
-    await clickText(page, 'Suspend');
-    if (!(await waitFor(page, 'Resume', {}, 10)))
+    // Serial console overlay (JS-managed, outside Clay)
+    await sleep(500);
+    await clickText(page, 'Console');
+    await sleep(1000);
+    if (!(await page.$('#consoleOverlay'))) throw new Error('console overlay did not open');
+    const consoleClosed = await page.evaluate(() => {
+        const o = document.getElementById('consoleOverlay');
+        const a = o && [...o.querySelectorAll('a')].find(x => x.textContent === 'Close');
+        if (a) a.click();
+        return !document.getElementById('consoleOverlay');
+    });
+    if (!consoleClosed) throw new Error('console overlay did not close');
+    console.log('serial console open/close: OK');
+
+    // Suspend -> Resume -> Stop (retry clicks against the refresh)
+    if (!(await clickUntil(page, 'Suspend', 'Resume', 5)))
         throw new Error('suspend did not take');
     console.log('suspend: OK');
-
-    // Resume -> Suspend
-    await sleep(800);
-    await clickText(page, 'Resume');
-    if (!(await waitFor(page, 'Suspend', {}, 10)))
+    if (!(await clickUntil(page, 'Resume', 'Suspend', 5)))
         throw new Error('resume did not take');
     console.log('resume: OK');
-
-    // Stop -> Start (stopped shows Start + Delete)
-    await sleep(800);
-    await clickText(page, 'Stop');
-    if (!(await waitFor(page, 'Start', {}, 12)))
+    if (!(await clickUntil(page, 'Stop', 'Start', 5)))
         throw new Error('stop did not take');
     console.log('stop: OK');
+
+    // Console proxy through nginx: a stopped VM's socket is gone, so the
+    // handler upgrades the WebSocket and reports "console unavailable".
+    const cmsg = await page.evaluate(async () => {
+        const r = await fetch('/api/vms', { credentials: 'same-origin' });
+        const d = await r.json();
+        const vm = (d.vms || []).find(v => v.name === 'uitestvm');
+        if (!vm) return 'no-vm';
+        return await new Promise((res) => {
+            const p = location.protocol === 'https:' ? 'wss' : 'ws';
+            const ws = new WebSocket(p + '://' + location.host + '/api/vms/' + vm.id + '/console');
+            let got = '';
+            ws.onmessage = (e) => { if (typeof e.data === 'string') got += e.data; };
+            ws.onclose = () => res(got);
+            setTimeout(() => { try { ws.close(); } catch (e) {} res(got); }, 4000);
+        });
+    });
+    if (!cmsg.includes('console unavailable'))
+        throw new Error('console proxy unavailable path failed: ' + cmsg);
+    console.log('console proxy (WebSocket upgrade): OK');
 
     // Delete (two-click)
     await sleep(800);
