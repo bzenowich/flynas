@@ -239,6 +239,12 @@
     // ----------------------------------------------------------------
     let stringPoolBase = 0;
     let stringPoolOffset = 0;
+    // Page auto-refreshers pause briefly after any interaction so a
+    // full rebuild can't land mid-click / mid-keystroke and drop it.
+    let lastInteraction = 0;
+    const REFRESH_QUIET_MS = 3000;
+    function interacted() { lastInteraction = Date.now(); }
+    function recentlyInteracted() { return Date.now() - lastInteraction < REFRESH_QUIET_MS; }
 
     function poolReset() { stringPoolOffset = 0; }
     function poolWrite(str) {
@@ -453,6 +459,7 @@
     }
 
     function handleAuthKey(event) {
+        interacted();
         if (authScreen === SCREEN_MAIN) {
             const page = instance.exports.GetActivePage();
             if (page === PAGE_ACCOUNTS) {
@@ -619,6 +626,10 @@
 
     function handlePageAction(packed) {
         const action = packed & 63, arg = packed >> 6;
+        if (action === PACT_VMNET_TOGGLE) {
+            toggleVmnet();
+            return;
+        }
         if (action >= 42) {
             handleAppAction(action, arg);
             return;
@@ -1336,8 +1347,8 @@
             if (instance.exports.GetActivePage() !== PAGE_MONITORING) {
                 clearInterval(monTimer); monTimer = null; return;
             }
-            // Don't rebuild the page mid-typing (would drop clicks/keys)
-            // — pause while a field is focused or a form has content.
+            // Pause refresh right after an interaction (see watchVms).
+            if (recentlyInteracted()) return;
             if (accFocus >= 13 && accFocus <= 17) return;
             if (monInputs.name || monInputs.target || monInputs.interval ||
                 chanInputs.name || chanInputs.detail) return;
@@ -1470,6 +1481,8 @@
     const PAGE_VMS = 6;
     const PACT_VM_CREATE = 36, PACT_VM_DELETE = 37, PACT_VM_START = 38,
           PACT_VM_STOP = 39, PACT_VM_SUSPEND = 40, PACT_VM_RESUME = 41;
+    const PACT_VMNET_TOGGLE = 43;
+    let vmnetEnabled = false;
 
     let vmList = [];
     // focus indices 18..21 (see VmsCard in main.c)
@@ -1499,12 +1512,20 @@
         instance.exports.SetVmInputs(n.off, n.len, c.off, c.len, r.off, r.len, d.off, d.len);
         const err = write(vmError), info = write(vmInfo);
         instance.exports.SetVmMsg(err.off, err.len, info.off, info.len);
+        instance.exports.SetVmnet(vmnetEnabled ? 1 : 0);
+    }
+
+    function toggleVmnet() {
+        vmsMutate(sendJSON('PUT', '/api/network/vmnet', { enabled: !vmnetEnabled }),
+            vmnetEnabled ? 'VM network disabled' : 'VM network enabled (NAT)');
     }
 
     async function loadVms() {
         try {
-            const data = await getJSON('/api/vms');
-            vmList = Array.isArray(data.vms) ? data.vms : [];
+            const [vms, vmnet] = await Promise.all([
+                getJSON('/api/vms'), getJSON('/api/network/vmnet')]);
+            vmList = Array.isArray(vms.vms) ? vms.vms : [];
+            vmnetEnabled = !!vmnet.enabled;
         } catch (err) {
             vmError = 'load failed: ' + err;
         }
@@ -1518,8 +1539,9 @@
             if (instance.exports.GetActivePage() !== PAGE_VMS) {
                 clearInterval(vmTimer); vmTimer = null; return;
             }
-            // Don't rebuild the page mid-typing (would drop clicks/keys)
-            // — pause while a field is focused or the form has content.
+            // Don't rebuild the page right after an interaction — a
+            // full rebuild can drop an in-flight click/keystroke.
+            if (recentlyInteracted()) return;
             if (accFocus >= 18 && accFocus <= 21) return;
             if (vmInputs.name || vmInputs.cpus || vmInputs.ram || vmInputs.disk) return;
             loadVms();
@@ -2119,7 +2141,7 @@
                 else if (page === PAGE_APPS) loadApps();
             }
             const pageAction = instance.exports.TakePageAction();
-            if (pageAction) handlePageAction(pageAction);
+            if (pageAction) { interacted(); handlePageAction(pageAction); }
         }
         renderLoopHTML();
         requestAnimationFrame(renderLoop);

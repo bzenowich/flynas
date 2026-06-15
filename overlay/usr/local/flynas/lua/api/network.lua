@@ -214,4 +214,46 @@ function _M.set_ntp(body)
     json.response({ status = "ok", enabled = server ~= nil, server = server })
 end
 
+-- ---- VM NAT network (flynas0 bridge) --------------------------
+
+-- GET /api/network/vmnet
+function _M.get_vmnet()
+    local up = capture("/sbin/ifconfig flynas0") ~= nil
+    json.response({
+        enabled = up,
+        subnet = "10.77.0.0/24",
+        gateway = "10.77.0.1",
+        uplink = primary_interface(),
+    })
+end
+
+-- PUT /api/network/vmnet  { enabled }
+function _M.set_vmnet(body)
+    if not body or body.enabled == nil then
+        json.response({ error = "enabled required" }, 400)
+        return
+    end
+    if body.enabled then
+        local uplink = primary_interface()
+        if not uplink then
+            json.response({ error = "no uplink interface found" }, 500)
+            return
+        end
+        local ok, err = exec.vmbridge_up(uplink)
+        if not ok then
+            ngx.log(ngx.ERR, "vmbridge up failed: ", err)
+            json.response({ error = "enable failed: " .. (err or "?") }, 500)
+            return
+        end
+    else
+        local ok, err = exec.vmbridge_down()
+        if not ok then
+            ngx.log(ngx.ERR, "vmbridge down failed: ", err)
+            json.response({ error = "disable failed: " .. (err or "?") }, 500)
+            return
+        end
+    end
+    json.response({ status = "ok", enabled = body.enabled and true or false })
+end
+
 return _M

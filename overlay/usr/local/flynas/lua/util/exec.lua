@@ -139,6 +139,14 @@ function _M.vm_delete(name, volume)
     return run({ "vmdelete", name, volume or "-" })
 end
 
+function _M.vmbridge_up(uplink)
+    return run({ "netbridge", "up", uplink })
+end
+
+function _M.vmbridge_down()
+    return run({ "netbridge", "down" })
+end
+
 function _M.write_ssh_keys(username, keys_text)
     return run_with_stdin({ "sshkeys", username, "write" }, keys_text)
 end

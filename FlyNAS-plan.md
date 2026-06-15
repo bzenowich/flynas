@@ -427,11 +427,23 @@ reaches the socket because the helper makes the run dir setgid-flynas
 and `chmod 0770`s the sockets after launch (connect() needs write).
 Disk images live at `/data/<volume>/vms/<name>.img` (or the system
 `/usr/local/flynas/vms/` when no volume given); each VM gets `tap<1000+id>`.
-Live status comes from QMP, not the DB. **Deferred:** `/api/vms/:id/console`
-serial WebSocket (serial unix socket is wired, bridge TODO), and
-bridging the tap to the physical NIC for LAN access (taps come up
-standalone for now — avoids dropping the host's own link; `resty.websocket`
-is available for the console).
+Live status comes from QMP, not the DB.
+
+**VM networking — NAT model (2026-06-14, diverged from LAN-bridge):** the
+dev VM uses QEMU slirp (NAT), which can't be L2-bridged, so VM networking
+is a host-internal NAT'd bridge instead of bridging the physical NIC. The
+helper `netbridge up <uplink>` creates `flynas0` (10.77.0.1/24 gateway),
+enables `net.inet.ip.forwarding`, and loads a pf ruleset (`nat on <uplink>
+from 10.77.0.0/24`, permissive `pass all` so it can't lock out management,
+plus a `flynas-fwd` rdr-anchor for future port-forwards); `vmstart` adds
+each VM's tap to `flynas0` if present. Guests then get NAT'd outbound and,
+being on the host's subnet, are directly probeable by the monitor worker.
+API `GET/PUT /api/network/vmnet {enabled}` + a VMs-page "NAT network"
+toggle. This never touches the management interface (verified SSH-safe on
+h2dev). **Still deferred:** guest DHCP (dnsmasq) / per-VM IP assignment,
+inbound port-forwards (rdr rules) to expose apps on the LAN,
+`/api/vms/:id/console` serial WebSocket (`resty.websocket` available), and
+true LAN-identity bridging of the physical NIC (real-hardware only).
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -592,7 +604,7 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303. Monitoring page DONE — summary card (up/down/paused + 24h uptime), monitors card (status dot, type·target, uptime%/last-response, Pause/Resume, two-click delete, expandable per-monitor notification-channel checkboxes, add form with type-cycle button + interval), notification-channels card (add with type-cycle email/webhook + target, two-click delete); page live-refreshes every 5s; monitoring strings at 98304..114687 (STRING_POOL_SIZE now 114688); page actions 27..35. VMs page DONE — VM list (status dot, spec, lifecycle buttons that switch by state: Start/Delete when stopped, Suspend/Stop when running, Resume/Stop when suspended) + create form (name/vCPU/RAM/disk); live-refreshes every 5s (paused while a form field is focused, so the refresh can't drop keystrokes); VM strings at 114688..131071 (STRING_POOL_SIZE now 131072); page actions 36..41. Apps page DONE — install catalog (one shared "install as" name + optional static-IP form, per-app rows with description/defaults + Install button); app strings at 131072..147455 (STRING_POOL_SIZE now 147456); page action 42. The VMs/Monitoring/Apps live-refresh pauses while a form field is focused or a form has unsaved content, so the 5s rebuild can't drop keystrokes. Remaining page (Settings) is a placeholder.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303. Monitoring page DONE — summary card (up/down/paused + 24h uptime), monitors card (status dot, type·target, uptime%/last-response, Pause/Resume, two-click delete, expandable per-monitor notification-channel checkboxes, add form with type-cycle button + interval), notification-channels card (add with type-cycle email/webhook + target, two-click delete); page live-refreshes every 5s; monitoring strings at 98304..114687 (STRING_POOL_SIZE now 114688); page actions 27..35. VMs page DONE — VM list (status dot, spec, lifecycle buttons that switch by state: Start/Delete when stopped, Suspend/Stop when running, Resume/Stop when suspended) + create form (name/vCPU/RAM/disk) + a "NAT network" toggle (flynas0); live-refreshes every 5s (paused for 3s after any interaction so the rebuild can't drop clicks/keystrokes); VM strings at 114688..131071 (STRING_POOL_SIZE now 131072); page actions 36..41. Apps page DONE — install catalog (one shared "install as" name + optional static-IP form, per-app rows with description/defaults + Install button); app strings at 131072..147455 (STRING_POOL_SIZE now 147456); page action 42. The VMs/Monitoring/Apps live-refresh pauses while a form field is focused or a form has unsaved content, so the 5s rebuild can't drop keystrokes. Remaining page (Settings) is a placeholder.
 
 ---
 
@@ -684,6 +696,24 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 
 ## Progress Log
 
+- **2026-06-14 (latest+1)**: VM networking — NAT'd internal bridge
+  (`flynas0`). Helper `netbridge up <uplink>`/`down` (create bridge +
+  10.77.0.1/24 gateway, `net.inet.ip.forwarding=1`, pf NAT for
+  10.77.0.0/24 with permissive `pass all`); `vmstart` joins each tap to
+  `flynas0`; API `GET/PUT /api/network/vmnet`; VMs-page "NAT network"
+  toggle. Verified on h2dev: enable → pf Enabled + NAT rule + forwarding +
+  bridge, VM tap joins, disable → clean, **vtnet0/SSH untouched
+  throughout**. Chose NAT over physical-NIC bridge because the dev VM's
+  slirp can't be L2-bridged (user decision); gives guests outbound NAT +
+  host-side monitor reachability without LAN bridging. Gotchas: `pfctl`
+  is at `/usr/sbin/pfctl` not `/sbin` (wrong path → silent execv fail →
+  pf never enabled); pf `($if:0)` nat target doesn't parse on this pf,
+  use `($if)`. Also added a refresh debounce: the VMs/Monitoring 5s
+  auto-refresh now pauses for 3s after any interaction (keystroke or page
+  action) so a rebuild can't drop an in-flight click — fixes recurring
+  create-form flakiness in the UI tests. Deferred: guest DHCP, inbound
+  port-forwards (rdr), serial console. Tests green: test-vms (incl. NAT
+  toggle), test-monitoring, test-apps.
 - **2026-06-14 (latest)**: Step 11 done. App catalog (9 templates seeded
   in init.lua) + `api/apps.lua` (list + install = VM-from-template with
   auto-monitor linked via `vms.monitor_id`, cascaded on VM delete), Apps
@@ -751,5 +781,5 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 ## Open Questions
 
 1. **Seafile on DragonFlyBSD VM**: Seafile typically runs on Linux. The VM approach (QEMU/NVMM with a Linux guest) handles this, but need to create/test the post-install automation scripts.
-2. ~~**Tap networking for VMs**~~: RESOLVED 2026-06-14 — `if_tap` + `if_bridge` work on 6.4 (`ifconfig tap0/bridge0 create` succeed). Each VM gets `tap<1000+id>`, brought up by the helper. Still TODO: bridge the tap to the physical NIC for LAN access (deferred to avoid dropping the host link; see §2.7).
+2. ~~**Tap networking for VMs**~~: RESOLVED 2026-06-14 — `if_tap` + `if_bridge` work on 6.4. Implemented as a host-internal **NAT'd bridge** (`flynas0` 10.77.0.1/24 + pf NAT + ip forwarding), not a physical-NIC bridge, because the dev VM's slirp interface can't be L2-bridged (see §2.7). Each VM's `tap<1000+id>` joins `flynas0`. True physical-NIC bridging (guests with LAN identities) is real-hardware-only; the NAT model gives guests outbound + host-side monitor reachability now.
 3. ~~**HAMMER2 volume-del behavior**~~: RESOLVED 2026-06-12 — `volume-add`/`volume-del` do not exist in DragonFly 6.4's hammer2(8). Volume disk sets are fixed at creation; see §2.5.

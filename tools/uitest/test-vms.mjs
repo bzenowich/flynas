@@ -97,6 +97,19 @@ try {
     console.log('VMs page renders: OK');
     await sleep(1500);   // let the initial load settle before interacting
 
+    // NAT network toggle (flynas0 bridge + pf). Toggle on then off so
+    // the rest of the test runs in a known (off) state.
+    const wasOn = !!(await findText(page, 'On'));
+    await clickText(page, wasOn ? 'On' : 'Off');
+    await sleep(2000);
+    if (!(await findText(page, wasOn ? 'Off' : 'On')))
+        throw new Error('NAT network toggle did not flip');
+    await clickText(page, wasOn ? 'Off' : 'On');
+    await sleep(2000);
+    if (!(await findText(page, wasOn ? 'On' : 'Off')))
+        throw new Error('NAT network toggle did not flip back');
+    console.log('NAT network toggle: OK');
+
     // Create a small VM. Fill the form, then click Create; the Start
     // button only appears in a real VM row (the name also echoes in
     // the input, so don't assert on it). Retry — the page's 5s refresh

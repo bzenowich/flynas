@@ -765,6 +765,9 @@ static int do_ntp(const char *server)
 #define IFCONFIG_CMD "/sbin/ifconfig"
 #define VM_RUN_DIR "/var/run/flynas"
 #define VM_SYS_DIR "/usr/local/flynas/vms"
+#define VM_BRIDGE "flynas0"
+
+static int iface_exists(const char *name);   /* defined with the bridge ops */
 
 /* unsigned integer in [min,max] */
 static int valid_uint(const char *s, long min, long max)
@@ -940,6 +943,13 @@ static int do_vmstart(char *argv[])
     char *tu[] = { "ifconfig", (char *)tap, "up", NULL };
     run(IFCONFIG_CMD, tu);
 
+    /* Join the NAT bridge if it's been set up (else tap stays
+     * standalone — VM runs but has no network). */
+    if (iface_exists(VM_BRIDGE)) {
+        char *addm[] = { "ifconfig", VM_BRIDGE, "addm", (char *)tap, NULL };
+        run(IFCONFIG_CMD, addm);
+    }
+
     snprintf(drivebuf, sizeof(drivebuf),
         "file=%s,format=raw,if=virtio", image);
     snprintf(netbuf, sizeof(netbuf),
@@ -1034,6 +1044,87 @@ static int do_vmdelete(const char *name, const char *volume)
     vm_image_path(name, volume, path, sizeof(path));
     if (access(path, F_OK) == 0 && unlink(path) != 0)
         die("failed to remove disk image");
+    return 0;
+}
+
+/* ---- VM NAT network (internal bridge + pf NAT) --------------- */
+/* flynas0 is a host-internal bridge; the host is the guests' gateway
+ * at 10.77.0.1/24, pf NATs them out the uplink, and (being on the
+ * same subnet) the host can probe guests directly for monitoring.
+ * This does NOT touch the management interface. */
+
+#define VM_GW_CIDR "10.77.0.1/24"
+#define VM_SUBNET "10.77.0.0/24"
+#define PFCTL_CMD "/usr/sbin/pfctl"
+#define SYSCTL_CMD "/sbin/sysctl"
+#define PF_CONF VM_RUN_DIR "/pf.conf"
+
+static int iface_exists(const char *name)
+{
+    char *args[] = { "ifconfig", (char *)name, NULL };
+    return run(IFCONFIG_CMD, args) == 0;
+}
+
+/* netbridge up <uplink>: ensure flynas0, forwarding, and pf NAT */
+static int do_netbridge_up(const char *uplink)
+{
+    FILE *f;
+
+    if (!valid_iface(uplink))
+        die("invalid uplink interface");
+
+    char *kld_bridge[] = { "kldload", "if_bridge", NULL };
+    run(KLDLOAD_CMD, kld_bridge);
+    char *kld_pf[] = { "kldload", "pf", NULL };
+    run(KLDLOAD_CMD, kld_pf);
+
+    if (!iface_exists(VM_BRIDGE)) {
+        char *mk[] = { "ifconfig", "bridge", "create", "name", VM_BRIDGE, NULL };
+        if (run(IFCONFIG_CMD, mk) != 0)
+            die("failed to create " VM_BRIDGE);
+    }
+    char *ip[] = { "ifconfig", VM_BRIDGE, "inet", VM_GW_CIDR, "alias", NULL };
+    run(IFCONFIG_CMD, ip);   /* alias: idempotent if already set */
+    char *up[] = { "ifconfig", VM_BRIDGE, "up", NULL };
+    run(IFCONFIG_CMD, up);
+
+    char *fwd[] = { "sysctl", "net.inet.ip.forwarding=1", NULL };
+    if (run(SYSCTL_CMD, fwd) != 0)
+        die("failed to enable ip forwarding");
+
+    /* Permissive ruleset (pass all = no filtering, just NAT + a
+     * port-forward anchor) so enabling pf can't lock out management. */
+    mkdir(VM_RUN_DIR, 0770);
+    f = fopen(PF_CONF, "w");
+    if (!f)
+        die("cannot write pf.conf");
+    fprintf(f,
+        "ext_if = \"%s\"\n"
+        "nat on $ext_if from %s to any -> ($ext_if)\n"
+        "rdr-anchor \"flynas-fwd\"\n"
+        "pass all\n",
+        uplink, VM_SUBNET);
+    fclose(f);
+
+    char *en[] = { "pfctl", "-e", NULL };
+    run(PFCTL_CMD, en);      /* ignore "already enabled" */
+    char *load[] = { "pfctl", "-f", PF_CONF, NULL };
+    if (run(PFCTL_CMD, load) != 0)
+        die("pfctl -f failed");
+    return 0;
+}
+
+/* netbridge down: tear the NAT network down */
+static int do_netbridge_down(void)
+{
+    char *dis[] = { "pfctl", "-d", NULL };
+    run(PFCTL_CMD, dis);
+    if (iface_exists(VM_BRIDGE)) {
+        char *rm[] = { "ifconfig", VM_BRIDGE, "destroy", NULL };
+        run(IFCONFIG_CMD, rm);
+    }
+    char *fwd[] = { "sysctl", "net.inet.ip.forwarding=0", NULL };
+    run(SYSCTL_CMD, fwd);
     return 0;
 }
 
@@ -1277,6 +1368,15 @@ int main(int argc, char *argv[])
         if (argc != 4)
             die("usage: flynas-helper vmdelete <name> <volume|->");
         rc = do_vmdelete(argv[2], argv[3]);
+
+    } else if (strcmp(cmd, "netbridge") == 0) {
+        if (argc == 3 && strcmp(argv[2], "down") == 0) {
+            rc = do_netbridge_down();
+        } else if (argc == 4 && strcmp(argv[2], "up") == 0) {
+            rc = do_netbridge_up(argv[3]);
+        } else {
+            die("usage: flynas-helper netbridge up <uplink> | down");
+        }
 
     } else {
         die("unknown command");

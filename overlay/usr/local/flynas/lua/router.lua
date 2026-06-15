@@ -198,6 +198,14 @@ local routes = {
         network_api.set_ntp(read_body())
     end,
 
+    ["GET:network/vmnet"] = function()
+        network_api.get_vmnet()
+    end,
+
+    ["PUT:network/vmnet"] = function()
+        network_api.set_vmnet(read_body())
+    end,
+
     -- Settings
     ["GET:settings/smtp"] = function()
         settings_api.get_smtp()

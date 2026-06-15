@@ -265,6 +265,7 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_VM_SUSPEND      40
 #define PACT_VM_RESUME       41
 #define PACT_APP_INSTALL     42
+#define PACT_VMNET_TOGGLE    43
 // Low 6 bits = action code, remaining bits = row id
 #define PACT_PACK(action, arg) ((action) | ((arg) << 6))
 
@@ -850,6 +851,11 @@ static int vmRowCount = 0;
 static Clay_String vmInName, vmInCpus, vmInRam, vmInDisk;
 static Clay_String vmError, vmInfo;
 static int vmPendingDelete = 0;
+static bool vmnetEnabled = false;   // flynas0 NAT network up?
+
+CLAY_WASM_EXPORT("SetVmnet") void SetVmnet(bool e) {
+    vmnetEnabled = e;
+}
 
 CLAY_WASM_EXPORT("ClearVms") void ClearVms(void) {
     vmRowCount = 0;
@@ -2040,7 +2046,20 @@ Clay_Color VmStatusColor(Clay_String s) {
 
 void VmsCard(void) {
     CARD("VmsCard") {
-        CardTitle(CLAY_STRING("Virtual machines"));
+        CLAY(CLAY_ID("VmHead"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CardTitle(CLAY_STRING("Virtual machines"));
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            CLAY_TEXT(CLAY_STRING("NAT network"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+            SmallButton(CLAY_ID("VmnetToggle"),
+                vmnetEnabled ? CLAY_STRING("On") : CLAY_STRING("Off"),
+                vmnetEnabled ? COLOR_GOOD : COLOR_MUTED, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_VMNET_TOGGLE, 0));
+        }
         if (vmRowCount == 0) {
             CLAY_TEXT(CLAY_STRING("No VMs — create one below"), CLAY_TEXT_CONFIG({
                 .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
