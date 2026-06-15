@@ -147,6 +147,14 @@ function _M.vmbridge_down()
     return run({ "netbridge", "down" })
 end
 
+function _M.dhcp_reload()
+    return run({ "dhcpreload" })
+end
+
+function _M.pf_fwd(uplink)
+    return run({ "pffwd", uplink })
+end
+
 function _M.write_ssh_keys(username, keys_text)
     return run_with_stdin({ "sshkeys", username, "write" }, keys_text)
 end

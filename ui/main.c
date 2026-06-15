@@ -266,6 +266,9 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_VM_RESUME       41
 #define PACT_APP_INSTALL     42
 #define PACT_VMNET_TOGGLE    43
+#define PACT_VM_SELECT       44
+#define PACT_FWD_ADD         45
+#define PACT_FWD_DELETE      46
 // Low 6 bits = action code, remaining bits = row id
 #define PACT_PACK(action, arg) ((action) | ((arg) << 6))
 
@@ -843,10 +846,20 @@ typedef struct {
     Clay_String name;
     Clay_String spec;     // "1 vCPU · 256 MB · 1 GB" formatted in JS
     Clay_String status;   // "running" | "stopped" | "suspended"
+    Clay_String ip;       // bridge IP
 } VmRow;
+
+typedef struct {
+    int id;
+    Clay_String label;    // "tcp 8080 -> 80" formatted in JS
+} FwdRow;
 
 static VmRow vmRows[MAX_ROWS];
 static int vmRowCount = 0;
+static FwdRow fwdRows[MAX_ROWS];
+static int fwdRowCount = 0;
+static int vmSelected = 0;        // expanded VM id (shows port-forwards)
+static Clay_String fwdHostInput, fwdGuestInput;
 // add-VM form: name, cpus, ram_mb, disk_gb
 static Clay_String vmInName, vmInCpus, vmInRam, vmInDisk;
 static Clay_String vmError, vmInfo;
@@ -865,14 +878,39 @@ CLAY_WASM_EXPORT("ClearVms") void ClearVms(void) {
 CLAY_WASM_EXPORT("AddVm")
 void AddVm(int id, uint32_t nameOff, uint32_t nameLen,
            uint32_t specOff, uint32_t specLen,
-           uint32_t statusOff, uint32_t statusLen) {
+           uint32_t statusOff, uint32_t statusLen,
+           uint32_t ipOff, uint32_t ipLen) {
     if (vmRowCount >= MAX_ROWS) return;
     vmRows[vmRowCount++] = (VmRow) {
         .id = id,
         .name = poolString(nameOff, nameLen),
         .spec = poolString(specOff, specLen),
         .status = poolString(statusOff, statusLen),
+        .ip = poolString(ipOff, ipLen),
     };
+}
+
+CLAY_WASM_EXPORT("ClearFwds") void ClearFwds(void) {
+    fwdRowCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddFwd")
+void AddFwd(int id, uint32_t labelOff, uint32_t labelLen) {
+    if (fwdRowCount >= MAX_ROWS) return;
+    fwdRows[fwdRowCount++] = (FwdRow) {
+        .id = id,
+        .label = poolString(labelOff, labelLen),
+    };
+}
+
+CLAY_WASM_EXPORT("SetVmSelected") void SetVmSelected(int id) {
+    vmSelected = id;
+}
+
+CLAY_WASM_EXPORT("SetFwdInputs")
+void SetFwdInputs(uint32_t hOff, uint32_t hLen, uint32_t gOff, uint32_t gLen) {
+    fwdHostInput = poolString(hOff, hLen);
+    fwdGuestInput = poolString(gOff, gLen);
 }
 
 CLAY_WASM_EXPORT("SetVmInputs")
@@ -2069,6 +2107,12 @@ void VmsCard(void) {
             bool running = cs_eq(v->status, "running");
             bool suspended = cs_eq(v->status, "suspended");
             bool stopped = !running && !suspended;
+            bool sel = (vmSelected == v->id);
+            CLAY(CLAY_IDI("VmRowWrap", v->id), { .layout = {
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 6,
+            } }) {
             CLAY(CLAY_IDI("VmRow", v->id), { .layout = {
                 .sizing = { .width = CLAY_SIZING_GROW(0) },
                 .childGap = 10,
@@ -2077,8 +2121,18 @@ void VmsCard(void) {
                 CLAY_TEXT(CLAY_STRING("●"), CLAY_TEXT_CONFIG({
                     .fontId = FONT_ID_BODY, .fontSize = 16,
                     .textColor = VmStatusColor(v->status) }));
-                CLAY_TEXT(v->name, CLAY_TEXT_CONFIG({
-                    .fontId = FONT_ID_MONO, .fontSize = 16, .textColor = COLOR_TEXT }));
+                CLAY(CLAY_IDI("VmName", v->id), {
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                }) {
+                    Clay_OnHover(HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_VM_SELECT, v->id));
+                    CLAY_TEXT(v->name, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_MONO, .fontSize = 16,
+                        .textColor = sel ? COLOR_ACCENT : COLOR_TEXT,
+                        .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                    }));
+                }
+                CLAY_TEXT(v->ip, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 13, .textColor = COLOR_MUTED }));
                 CLAY_TEXT(v->spec, CLAY_TEXT_CONFIG({
                     .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
                 CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
@@ -2107,6 +2161,49 @@ void VmsCard(void) {
                         vmPendingDelete == v->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
                         COLOR_BAD, HandleVmDelete, (void *)(intptr_t)v->id);
                 }
+            }
+            if (sel) {
+                CLAY(CLAY_IDI("VmFwds", v->id), { .layout = {
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .padding = { 26, 0, 2, 6 },
+                    .childGap = 4,
+                } }) {
+                    CLAY_TEXT(CLAY_STRING("Port forwards (host -> guest):"),
+                        CLAY_TEXT_CONFIG({ .fontId = FONT_ID_BODY, .fontSize = 13,
+                            .textColor = COLOR_MUTED }));
+                    if (fwdRowCount == 0) {
+                        CLAY_TEXT(CLAY_STRING("(none)"), CLAY_TEXT_CONFIG({
+                            .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                    }
+                    for (int j = 0; j < fwdRowCount; j++) {
+                        CLAY(CLAY_IDI("FwdRow", fwdRows[j].id), { .layout = {
+                            .sizing = { .width = CLAY_SIZING_GROW(0) },
+                            .childGap = 10,
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                        } }) {
+                            CLAY_TEXT(fwdRows[j].label, CLAY_TEXT_CONFIG({
+                                .fontId = FONT_ID_MONO, .fontSize = 14, .textColor = COLOR_TEXT }));
+                            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                            SmallButton(CLAY_IDI("FwdDel", fwdRows[j].id), CLAY_STRING("Remove"),
+                                COLOR_BAD, HandlePageButton,
+                                (void *)(intptr_t)PACT_PACK(PACT_FWD_DELETE, fwdRows[j].id));
+                        }
+                    }
+                    CLAY(CLAY_IDI("FwdAdd", v->id), { .layout = {
+                        .sizing = { .width = CLAY_SIZING_GROW(0) },
+                        .childGap = 8,
+                        .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                    } }) {
+                        TextInputBox(CLAY_ID("FwdHost"), fwdHostInput, CLAY_STRING("host port"), 24);
+                        CLAY_TEXT(CLAY_STRING("->"), CLAY_TEXT_CONFIG({
+                            .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+                        TextInputBox(CLAY_ID("FwdGuest"), fwdGuestInput, CLAY_STRING("guest port"), 25);
+                        SmallButton(CLAY_ID("FwdAddBtn"), CLAY_STRING("Forward"), COLOR_ACCENT,
+                            HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_FWD_ADD, v->id));
+                    }
+                }
+            }
             }
         }
         // Add-VM form

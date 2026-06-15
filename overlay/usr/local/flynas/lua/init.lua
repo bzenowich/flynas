@@ -108,6 +108,17 @@ conn:exec([[
 ]])
 
 conn:exec([[
+    CREATE TABLE IF NOT EXISTS port_forwards (
+        id INTEGER PRIMARY KEY,
+        vm_id INTEGER REFERENCES vms(id) ON DELETE CASCADE,
+        proto TEXT NOT NULL DEFAULT 'tcp',
+        host_port INTEGER NOT NULL,
+        guest_port INTEGER NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+]])
+
+conn:exec([[
     CREATE TABLE IF NOT EXISTS email_codes (
         id INTEGER PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,

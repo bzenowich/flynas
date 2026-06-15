@@ -2,6 +2,7 @@ local json = require("util.json")
 local db = require("util.db")
 local exec = require("util.exec")
 local qmp = require("util.qmp")
+local vmnet = require("util.vmnet")
 
 local DB_PATH = "/usr/local/flynas/flynas.db"
 local RUN_DIR = "/var/run/flynas"
@@ -111,14 +112,21 @@ function _M.create(body)
         "INSERT INTO vms (name, cpus, ram_mb, disk_gb, volume, iso_path, " ..
         "mac_address, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'stopped') RETURNING *",
         body.name, cpus, ram, disk, volume, body.iso_path, mac)
-    conn:close()
     if not rows then
+        conn:close()
         ngx.log(ngx.ERR, "vm insert failed: ", db_err)
         json.response({ error = "VM disk created but DB insert failed" }, 500)
         return
     end
-    rows[1].status = "stopped"
-    json.response(rows[1], 201)
+    local vm = rows[1]
+    -- Reserve a bridge IP so DHCP hands the guest a known address.
+    local ip = vmnet.vm_ip(vm.id)
+    conn:query("UPDATE vms SET ip_address = ? WHERE id = ?", ip, vm.id)
+    vm.ip_address = ip
+    vmnet.sync_dhcp(conn)
+    conn:close()
+    vm.status = "stopped"
+    json.response(vm, 201)
 end
 
 -- DELETE /api/vms/:id
@@ -148,6 +156,9 @@ function _M.delete(id)
     if vm.monitor_id then
         conn:query("DELETE FROM monitors WHERE id = ?", vm.monitor_id)
     end
+    -- port_forwards rows cascade via FK; refresh DHCP + pf anchor.
+    vmnet.sync_dhcp(conn)
+    vmnet.sync_forwards(conn)
     conn:close()
     json.response({ status = "ok" })
 end
@@ -239,6 +250,62 @@ function _M.resume(id)
     c2:query("UPDATE vms SET status = 'running' WHERE id = ?", id)
     c2:close()
     json.response({ status = "running" })
+end
+
+-- ---- Port forwards --------------------------------------------
+
+-- GET /api/vms/:id/forwards
+function _M.list_forwards(vm_id)
+    local conn = open_db()
+    local rows = conn:query(
+        "SELECT id, proto, host_port, guest_port FROM port_forwards " ..
+        "WHERE vm_id = ? ORDER BY host_port", vm_id) or {}
+    conn:close()
+    json.response({ forwards = rows })
+end
+
+-- POST /api/vms/:id/forwards  { host_port, guest_port, proto? }
+function _M.add_forward(vm_id, body)
+    local hp = math.floor(tonumber(body and body.host_port) or 0)
+    local gp = math.floor(tonumber(body and body.guest_port) or 0)
+    local proto = (body and body.proto) or "tcp"
+    if hp < 1 or hp > 65535 or gp < 1 or gp > 65535 then
+        json.response({ error = "host_port and guest_port must be 1-65535" }, 400)
+        return
+    end
+    if proto ~= "tcp" and proto ~= "udp" then
+        json.response({ error = "proto must be tcp or udp" }, 400)
+        return
+    end
+    local conn = open_db()
+    local vm = conn:query_one("SELECT id FROM vms WHERE id = ?", vm_id)
+    if not vm then
+        conn:close()
+        json.response({ error = "vm not found" }, 404)
+        return
+    end
+    local rows = conn:query(
+        "INSERT INTO port_forwards (vm_id, proto, host_port, guest_port) " ..
+        "VALUES (?, ?, ?, ?) RETURNING id, proto, host_port, guest_port",
+        vm_id, proto, hp, gp)
+    vmnet.sync_forwards(conn)
+    conn:close()
+    json.response(rows and rows[1] or {}, 201)
+end
+
+-- DELETE /api/forwards/:id
+function _M.delete_forward(fid)
+    local conn = open_db()
+    local row = conn:query_one("SELECT id FROM port_forwards WHERE id = ?", fid)
+    if not row then
+        conn:close()
+        json.response({ error = "forward not found" }, 404)
+        return
+    end
+    conn:query("DELETE FROM port_forwards WHERE id = ?", fid)
+    vmnet.sync_forwards(conn)
+    conn:close()
+    json.response({ status = "ok" })
 end
 
 return _M

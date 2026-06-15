@@ -1,6 +1,7 @@
 local json = require("util.json")
 local db = require("util.db")
 local exec = require("util.exec")
+local vmnet = require("util.vmnet")
 
 local DB_PATH = "/usr/local/flynas/flynas.db"
 
@@ -87,7 +88,14 @@ function _M.install(id, body)
     end
     local vm = rows[1]
 
-    -- Auto-monitor (only meaningful once the app has a reachable IP)
+    -- Reserve a bridge IP (DHCP hands it to the guest) if none given.
+    if not ip then
+        ip = vmnet.vm_ip(vm.id)
+        conn:query("UPDATE vms SET ip_address = ? WHERE id = ?", ip, vm.id)
+        vm.ip_address = ip
+    end
+
+    -- Auto-monitor pointed at the app on the bridge.
     if ip then
         local target = string.format("http://%s:%d%s",
             ip, tpl.monitor_port or 80, tpl.monitor_path or "/")
@@ -104,6 +112,7 @@ function _M.install(id, body)
         end
     end
 
+    vmnet.sync_dhcp(conn)
     conn:close()
     vm.status = "stopped"
     json.response(vm, 201)

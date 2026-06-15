@@ -97,18 +97,14 @@ try {
     console.log('VMs page renders: OK');
     await sleep(1500);   // let the initial load settle before interacting
 
-    // NAT network toggle (flynas0 bridge + pf). Toggle on then off so
-    // the rest of the test runs in a known (off) state.
-    const wasOn = !!(await findText(page, 'On'));
-    await clickText(page, wasOn ? 'On' : 'Off');
-    await sleep(2000);
-    if (!(await findText(page, wasOn ? 'Off' : 'On')))
-        throw new Error('NAT network toggle did not flip');
-    await clickText(page, wasOn ? 'Off' : 'On');
-    await sleep(2000);
-    if (!(await findText(page, wasOn ? 'On' : 'Off')))
-        throw new Error('NAT network toggle did not flip back');
-    console.log('NAT network toggle: OK');
+    // Enable the NAT network (flynas0 + dnsmasq + pf) and leave it on
+    // so the port-forward test below has a loaded pf anchor.
+    if (await findText(page, 'Off')) {
+        await clickText(page, 'Off');
+        await sleep(2500);
+    }
+    if (!(await findText(page, 'On'))) throw new Error('NAT network did not enable');
+    console.log('NAT network enable: OK');
 
     // Create a small VM. Fill the form, then click Create; the Start
     // button only appears in a real VM row (the name also echoes in
@@ -116,12 +112,16 @@ try {
     // can eat a click.
     await clickText(page, 'name');
     await page.keyboard.type('uitestvm');
+    await sleep(300);
     await clickText(page, 'vCPU');
     await page.keyboard.type('1');
+    await sleep(300);
     await clickText(page, 'RAM MB');
     await page.keyboard.type('256');
+    await sleep(300);
     await clickText(page, 'disk GB');
     await page.keyboard.type('1');
+    await sleep(300);
     let created = false;
     for (let attempt = 0; attempt < 3 && !created; attempt++) {
         await clickText(page, 'Create');
@@ -130,6 +130,33 @@ try {
     }
     if (!created) throw new Error('VM not created (no Start button)');
     console.log('create VM: OK');
+
+    // Port-forward: expand the VM, add 8080 -> 80, then remove it.
+    await sleep(800);
+    await clickText(page, 'uitestvm');   // name click expands the row
+    if (!(await waitFor(page, 'Port forwards', { prefix: true }, 6)))
+        throw new Error('VM row did not expand');
+    await clickText(page, 'host port');
+    await page.keyboard.type('8080');
+    await sleep(300);
+    await clickText(page, 'guest port');
+    await page.keyboard.type('80');
+    await sleep(300);
+    await clickText(page, 'Forward');
+    if (!(await waitFor(page, 'tcp 8080 -> 80', {}, 8)))
+        throw new Error('port-forward not added');
+    console.log('add port-forward: OK');
+    await sleep(800);
+    await clickText(page, 'Remove');
+    let fgone = false;
+    for (let i = 0; i < 8 && !fgone; i++) {
+        await sleep(1000);
+        fgone = !(await findText(page, 'tcp 8080 -> 80'));
+    }
+    if (!fgone) throw new Error('port-forward not removed');
+    console.log('remove port-forward: OK');
+    await clickText(page, 'uitestvm');   // collapse
+    await sleep(800);
 
     // Start -> running (Suspend button appears once running)
     await sleep(500);
@@ -172,8 +199,17 @@ try {
         gone = !(await findText(page, 'uitestvm'));
     }
     if (!gone) throw new Error('VM still present after delete');
-    await page.screenshot({ path: '/tmp/flynas-uitest/vms-3.png' });
     console.log('delete VM: OK');
+
+    // Leave the NAT network off (clean state)
+    await sleep(800);
+    if (await findText(page, 'On')) {
+        await clickText(page, 'On');
+        await sleep(2500);
+        if (!(await findText(page, 'Off'))) throw new Error('NAT network did not disable');
+    }
+    await page.screenshot({ path: '/tmp/flynas-uitest/vms-3.png' });
+    console.log('NAT network disable: OK');
     console.log('ALL OK');
 } catch (err) {
     failed = true;

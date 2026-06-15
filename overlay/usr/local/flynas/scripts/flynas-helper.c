@@ -1058,6 +1058,47 @@ static int do_vmdelete(const char *name, const char *volume)
 #define PFCTL_CMD "/usr/sbin/pfctl"
 #define SYSCTL_CMD "/sbin/sysctl"
 #define PF_CONF VM_RUN_DIR "/pf.conf"
+#define DNSMASQ_CMD "/usr/local/sbin/dnsmasq"
+#define DNSMASQ_CONF "/usr/local/flynas/conf/dnsmasq.conf"
+#define DHCP_HOSTS VM_RUN_DIR "/dhcp-hosts"
+#define DNSMASQ_PID VM_RUN_DIR "/dnsmasq.pid"
+#define PF_FWD_SPEC VM_RUN_DIR "/fwd-spec"
+#define PF_FWD_ANCHOR "flynas-fwd"
+#define VM_NET_PREFIX "10.77.0."
+
+/* Read a pid from a file; 0 if absent/unreadable. */
+static long read_pidfile(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    long pid = 0;
+    if (f) {
+        if (fscanf(f, "%ld", &pid) != 1) pid = 0;
+        fclose(f);
+    }
+    return pid;
+}
+
+static void start_dnsmasq(void)
+{
+    long pid = read_pidfile(DNSMASQ_PID);
+    if (pid > 0 && kill((pid_t)pid, 0) == 0)
+        return;   /* already running */
+    /* hostsfile must exist before dnsmasq starts */
+    if (access(DHCP_HOSTS, F_OK) != 0) {
+        FILE *f = fopen(DHCP_HOSTS, "w");
+        if (f) fclose(f);
+    }
+    char *args[] = { "dnsmasq", "-C", DNSMASQ_CONF, NULL };
+    run(DNSMASQ_CMD, args);   /* dnsmasq daemonizes itself */
+}
+
+static void stop_dnsmasq(void)
+{
+    long pid = read_pidfile(DNSMASQ_PID);
+    if (pid > 0 && kill((pid_t)pid, 0) == 0)
+        kill((pid_t)pid, SIGTERM);
+    unlink(DNSMASQ_PID);
+}
 
 static int iface_exists(const char *name)
 {
@@ -1111,12 +1152,81 @@ static int do_netbridge_up(const char *uplink)
     char *load[] = { "pfctl", "-f", PF_CONF, NULL };
     if (run(PFCTL_CMD, load) != 0)
         die("pfctl -f failed");
+
+    start_dnsmasq();
+    return 0;
+}
+
+/* dhcpreload: SIGHUP dnsmasq so it re-reads the reservations file */
+static int do_dhcpreload(void)
+{
+    long pid = read_pidfile(DNSMASQ_PID);
+    if (pid > 0 && kill((pid_t)pid, 0) == 0)
+        kill((pid_t)pid, SIGHUP);
+    return 0;
+}
+
+/* pffwd <uplink>: rebuild the flynas-fwd rdr anchor from PF_FWD_SPEC,
+ * a www-written CSV of "proto,hostport,guestip,guestport" lines. Each
+ * field is validated here (www must not inject raw pf rules). */
+static int do_pffwd(const char *uplink)
+{
+    FILE *in, *out;
+    char line[256];
+    char tmp[] = VM_RUN_DIR "/fwd.rules";
+
+    if (!valid_iface(uplink))
+        die("invalid uplink");
+
+    out = fopen(tmp, "w");
+    if (!out)
+        die("cannot write rules file");
+
+    in = fopen(PF_FWD_SPEC, "r");
+    if (in) {
+        while (fgets(line, sizeof(line), in)) {
+            char proto[8], gip[32];
+            int hport, gport;
+            line[strcspn(line, "\n")] = '\0';
+            if (line[0] == '\0')
+                continue;
+            if (sscanf(line, "%7[a-z],%d,%31[0-9.],%d",
+                       proto, &hport, gip, &gport) != 4) {
+                fclose(in); fclose(out);
+                die("malformed forward spec");
+            }
+            if (strcmp(proto, "tcp") != 0 && strcmp(proto, "udp") != 0) {
+                fclose(in); fclose(out);
+                die("forward proto must be tcp or udp");
+            }
+            if (hport < 1 || hport > 65535 || gport < 1 || gport > 65535) {
+                fclose(in); fclose(out);
+                die("forward port out of range");
+            }
+            if (strncmp(gip, VM_NET_PREFIX, strlen(VM_NET_PREFIX)) != 0 ||
+                !valid_ipv4(gip)) {
+                fclose(in); fclose(out);
+                die("forward target must be a 10.77.0.x address");
+            }
+            fprintf(out,
+                "rdr pass on %s inet proto %s to port %d -> %s port %d\n",
+                uplink, proto, hport, gip, gport);
+        }
+        fclose(in);
+    }
+    fclose(out);
+
+    /* Load (or clear) the anchor. -f on an empty file flushes it. */
+    char *args[] = { "pfctl", "-a", PF_FWD_ANCHOR, "-f", tmp, NULL };
+    if (run(PFCTL_CMD, args) != 0)
+        die("pfctl anchor load failed");
     return 0;
 }
 
 /* netbridge down: tear the NAT network down */
 static int do_netbridge_down(void)
 {
+    stop_dnsmasq();
     char *dis[] = { "pfctl", "-d", NULL };
     run(PFCTL_CMD, dis);
     if (iface_exists(VM_BRIDGE)) {
@@ -1377,6 +1487,14 @@ int main(int argc, char *argv[])
         } else {
             die("usage: flynas-helper netbridge up <uplink> | down");
         }
+
+    } else if (strcmp(cmd, "dhcpreload") == 0) {
+        rc = do_dhcpreload();
+
+    } else if (strcmp(cmd, "pffwd") == 0) {
+        if (argc != 3)
+            die("usage: flynas-helper pffwd <uplink>");
+        rc = do_pffwd(argv[2]);
 
     } else {
         die("unknown command");

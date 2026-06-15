@@ -46,10 +46,13 @@ Preconditions (seed via API before running, clean up after):
   The page live-refreshes every 5s, so the test settles ~800ms between
   click and assertion to avoid clicking during a refresh.
 - test-vms: none (creates + deletes its own VM `uitestvm`, 1 GB disk on
-  the system dir, started under QEMU/NVMM). Cleanest with an empty vms
-  table and no orphan `/usr/local/flynas/vms/uitestvm.img`. Same 5s
-  refresh caveat — `findText` matches input echoes too, so assert on
-  row-only text (the `Start` button), not the VM name.
+  the system dir, started under QEMU/NVMM; also toggles the NAT network
+  and adds/removes a port-forward, so `dnsmasq` must be installed).
+  Cleanest with an empty vms/port_forwards table, no orphan
+  `uitestvm.img`, and the NAT bridge down. `findText` matches input
+  echoes too, so assert on row-only text (the `Start` button), not the VM
+  name. The page debounces its 5s refresh on interaction, but form-fill
+  steps still settle ~300ms between fields so focus/keys register.
 - test-apps: none (installs Seafile as VM `seafiletest`, then deletes it).
   Cleanest with an empty vms table and no orphan `seafiletest.img`.
   Installs the 7th catalog Install button (alphabetical: Seafile).

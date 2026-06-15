@@ -630,7 +630,7 @@
             toggleVmnet();
             return;
         }
-        if (action >= 42) {
+        if (action === PACT_APP_INSTALL) {
             handleAppAction(action, arg);
             return;
         }
@@ -1481,8 +1481,11 @@
     const PAGE_VMS = 6;
     const PACT_VM_CREATE = 36, PACT_VM_DELETE = 37, PACT_VM_START = 38,
           PACT_VM_STOP = 39, PACT_VM_SUSPEND = 40, PACT_VM_RESUME = 41;
-    const PACT_VMNET_TOGGLE = 43;
+    const PACT_VMNET_TOGGLE = 43, PACT_VM_SELECT = 44,
+          PACT_FWD_ADD = 45, PACT_FWD_DELETE = 46;
     let vmnetEnabled = false;
+    let vmSelected = 0, vmForwards = [];
+    let fwdInputs = { host: '', guest: '' };   // focus 24, 25
 
     let vmList = [];
     // focus indices 18..21 (see VmsCard in main.c)
@@ -1504,9 +1507,18 @@
             const name = write(v.name);
             const spec = write(v.cpus + ' vCPU · ' + v.ram_mb + ' MB · ' + v.disk_gb + ' GB');
             const status = write(v.status || 'stopped');
+            const ip = write(v.ip_address || '');
             instance.exports.AddVm(v.id, name.off, name.len, spec.off, spec.len,
-                status.off, status.len);
+                status.off, status.len, ip.off, ip.len);
         }
+        instance.exports.ClearFwds();
+        for (const f of vmForwards) {
+            const label = write(f.proto + ' ' + f.host_port + ' -> ' + f.guest_port);
+            instance.exports.AddFwd(f.id, label.off, label.len);
+        }
+        const fh = write(fwdInputs.host), fg = write(fwdInputs.guest);
+        instance.exports.SetFwdInputs(fh.off, fh.len, fg.off, fg.len);
+        instance.exports.SetVmSelected(vmSelected);
         const n = write(vmInputs.name), c = write(vmInputs.cpus),
               r = write(vmInputs.ram), d = write(vmInputs.disk);
         instance.exports.SetVmInputs(n.off, n.len, c.off, c.len, r.off, r.len, d.off, d.len);
@@ -1526,11 +1538,33 @@
                 getJSON('/api/vms'), getJSON('/api/network/vmnet')]);
             vmList = Array.isArray(vms.vms) ? vms.vms : [];
             vmnetEnabled = !!vmnet.enabled;
+            if (vmSelected && !vmList.some(v => v.id === vmSelected)) {
+                vmSelected = 0; vmForwards = [];
+            } else if (vmSelected) {
+                const d = await getJSON('/api/vms/' + vmSelected + '/forwards');
+                vmForwards = Array.isArray(d.forwards) ? d.forwards : [];
+            }
         } catch (err) {
             vmError = 'load failed: ' + err;
         }
         syncVms();
         watchVms();
+    }
+
+    async function selectVm(id) {
+        if (vmSelected === id) {
+            vmSelected = 0; vmForwards = [];
+            syncVms();
+            return;
+        }
+        vmSelected = id;
+        try {
+            const d = await getJSON('/api/vms/' + id + '/forwards');
+            vmForwards = Array.isArray(d.forwards) ? d.forwards : [];
+        } catch (err) {
+            vmForwards = [];
+        }
+        syncVms();
     }
 
     function watchVms() {
@@ -1589,23 +1623,48 @@
             case PACT_VM_RESUME:
                 vmsMutate(postJSON('/api/vms/' + arg + '/resume'));
                 break;
+            case PACT_VM_SELECT:
+                selectVm(arg);
+                break;
+            case PACT_FWD_ADD: {
+                const hp = parseInt(fwdInputs.host, 10), gp = parseInt(fwdInputs.guest, 10);
+                if (!hp || !gp) {
+                    vmError = 'host and guest port required'; syncVms(); break;
+                }
+                fwdInputs = { host: '', guest: '' };
+                vmsMutate(postJSON('/api/vms/' + arg + '/forwards',
+                    { host_port: hp, guest_port: gp, proto: 'tcp' }), 'Forward added');
+                break;
+            }
+            case PACT_FWD_DELETE:
+                vmsMutate(sendJSON('DELETE', '/api/forwards/' + arg));
+                break;
         }
     }
 
     function handleVmsKey(event) {
-        if (accFocus < 18 || accFocus > 21) return;
+        // 18-21 = create form; 24-25 = port-forward host/guest port
+        let obj, key, onEnter;
+        if (accFocus >= 18 && accFocus <= 21) {
+            obj = vmInputs; key = ['name', 'cpus', 'ram', 'disk'][accFocus - 18];
+            onEnter = () => handleVmAction(PACT_VM_CREATE, 0);
+        } else if (accFocus === 24 || accFocus === 25) {
+            obj = fwdInputs; key = accFocus === 24 ? 'host' : 'guest';
+            onEnter = () => handleVmAction(PACT_FWD_ADD, vmSelected);
+        } else {
+            return;
+        }
         if (event.ctrlKey || event.metaKey || event.altKey) return;
-        const key = ['name', 'cpus', 'ram', 'disk'][accFocus - 18];
         if (event.key === 'Enter') {
-            handleVmAction(PACT_VM_CREATE, 0);
+            onEnter();
         } else if (event.key === 'Backspace') {
-            vmInputs[key] = vmInputs[key].slice(0, -1);
+            obj[key] = obj[key].slice(0, -1);
             syncVms();
         } else if (event.key === 'Escape') {
             accFocus = -1;
             instance.exports.SetAccountsFocus(-1);
-        } else if (event.key.length === 1 && vmInputs[key].length < 32) {
-            vmInputs[key] += event.key;
+        } else if (event.key.length === 1 && obj[key].length < 32) {
+            obj[key] += event.key;
             syncVms();
         } else {
             return;

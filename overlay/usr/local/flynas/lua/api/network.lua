@@ -245,6 +245,15 @@ function _M.set_vmnet(body)
             json.response({ error = "enable failed: " .. (err or "?") }, 500)
             return
         end
+        -- Re-apply DHCP reservations + port-forwards now the bridge is up.
+        local vmnet = require("util.vmnet")
+        local db = require("util.db")
+        local conn = db.open("/usr/local/flynas/flynas.db")
+        if conn then
+            vmnet.sync_dhcp(conn)
+            vmnet.sync_forwards(conn)
+            conn:close()
+        end
     else
         local ok, err = exec.vmbridge_down()
         if not ok then

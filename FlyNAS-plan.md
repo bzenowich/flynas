@@ -440,10 +440,23 @@ each VM's tap to `flynas0` if present. Guests then get NAT'd outbound and,
 being on the host's subnet, are directly probeable by the monitor worker.
 API `GET/PUT /api/network/vmnet {enabled}` + a VMs-page "NAT network"
 toggle. This never touches the management interface (verified SSH-safe on
-h2dev). **Still deferred:** guest DHCP (dnsmasq) / per-VM IP assignment,
-inbound port-forwards (rdr rules) to expose apps on the LAN,
-`/api/vms/:id/console` serial WebSocket (`resty.websocket` available), and
-true LAN-identity bridging of the physical NIC (real-hardware only).
+h2dev).
+
+**Guest DHCP + port-forwards (2026-06-14):** dnsmasq serves DHCP/DNS on
+`flynas0` (started/stopped with the bridge by the helper). Each VM gets a
+deterministic reserved address `10.77.0.<100+id>` written to a
+`dhcp-hostsfile` (rewritten by the API from the DB, reloaded via SIGHUP) —
+so a guest that DHCPs lands on a known IP, and its auto-monitor targets it.
+Inbound port-forwards are pf `rdr` rules in the `flynas-fwd` anchor:
+`port_forwards` table, API `GET/POST /api/vms/:id/forwards` +
+`DELETE /api/forwards/:id`, helper `pffwd <uplink>` rebuilds the anchor
+from a www-written CSV spec (each field re-validated in C — www can't
+inject raw pf). UI: VM rows show the IP and expand to manage forwards.
+**Still deferred:** `/api/vms/:id/console` serial WebSocket
+(`resty.websocket` available), automated guest OS install (ISO +
+unattended + post-install script), and true LAN-identity bridging of the
+physical NIC (real-hardware only — guests reach the LAN today via the
+host's port-forwards).
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -696,6 +709,21 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 
 ## Progress Log
 
+- **2026-06-14 (latest+2)**: Guest DHCP + port-forwards. dnsmasq on
+  `flynas0` (started/stopped by the helper with the bridge) hands each VM
+  a reserved `10.77.0.<100+id>` via a SIGHUP-reloaded dhcp-hostsfile that
+  the API rewrites from the DB; VM create/install assign the IP and the
+  app auto-monitor now targets it. Port-forwards: `port_forwards` table,
+  `GET/POST /api/vms/:id/forwards` + `DELETE /api/forwards/:id`, helper
+  `pffwd` rebuilds the `flynas-fwd` pf rdr anchor from a re-validated CSV
+  spec (no raw-rule injection from www). VMs page shows each VM's IP and
+  expands to add/remove forwards. Verified on h2dev: enable → dnsmasq up,
+  create → reservation in dhcp-hosts, add forward → rdr rule in anchor,
+  delete/disable → all cascade-cleaned; test-vms covers it end-to-end
+  (NAT enable → create → forward add/remove → lifecycle → delete →
+  disable). UI-test note: the refresh debounce needs interaction events to
+  register, so the form-fill steps settle ~300ms between fields. Tests
+  green: test-vms, test-apps, test-monitoring.
 - **2026-06-14 (latest+1)**: VM networking — NAT'd internal bridge
   (`flynas0`). Helper `netbridge up <uplink>`/`down` (create bridge +
   10.77.0.1/24 gateway, `net.inet.ip.forwarding=1`, pf NAT for
