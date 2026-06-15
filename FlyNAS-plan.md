@@ -414,7 +414,24 @@ atomically. Mountpoints live under `/data/<name>`.
   incremental re-sync (+1 block), restore-browse, and a full
   `cryfs-batch restore` from the synced copy (`cmp` clean against source).
 
-### 2.7 VM API
+### 2.7 VM API — DONE (diverged: QMP from Lua; console + LAN bridge deferred)
+
+**Implementation notes (2026-06-14):** QEMU 9.2 + NVMM (`/dev/nvmm`,
+`kldload nvmm`), verified working nested on h2dev. Privilege split:
+the setuid helper does the root-only bits (`vmcreate` = qemu-img raw
+image, `vmstart` = load nvmm + create/up tap + daemonized QEMU,
+`vmstop` = SIGTERM→SIGKILL + tap/socket teardown, `vmdelete`); QMP
+control (status/suspend=`stop`/resume=`cont`/powerdown) runs from Lua
+(`util/qmp.lua`) over the per-VM unix socket. nginx (www, in flynas)
+reaches the socket because the helper makes the run dir setgid-flynas
+and `chmod 0770`s the sockets after launch (connect() needs write).
+Disk images live at `/data/<volume>/vms/<name>.img` (or the system
+`/usr/local/flynas/vms/` when no volume given); each VM gets `tap<1000+id>`.
+Live status comes from QMP, not the DB. **Deferred:** `/api/vms/:id/console`
+serial WebSocket (serial unix socket is wired, bridge TODO), and
+bridging the tap to the physical NIC for LAN access (taps come up
+standalone for now — avoids dropping the host's own link; `resty.websocket`
+is available for the console).
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -443,9 +460,28 @@ qemu-system-x86_64 \
 
 Network: Create `tap` interfaces bridged to physical NIC. Static IP configured inside guest via post-install script or cloud-init.
 
-### 2.8 Monitoring API
+### 2.8 Monitoring API — DONE (diverged: raw cosockets, no lua-resty-http)
 
 Built-in service monitoring, replacing Uptime Kuma. Runs entirely within OpenResty using `ngx.timer` for background checks and `lua-resty-http` / `resty.socket` for probes.
+
+**Plan changes / implementation notes (2026-06-14):**
+- **No `lua-resty-http` on the box** — HTTP/keyword checks issue a minimal
+  `GET` over a raw `ngx.socket.tcp` cosocket (parse status line, optional
+  body keyword search), `util/probe.lua`. TCP checks just connect.
+- **ping/dns shell out via `resty.shell`** (`ngx.pipe`, non-blocking in the
+  timer) using argv arrays (`{"ping","-c","1","-W",<ms>,host}` /
+  `{"drill",host}`) — injection-safe; targets are also char-validated.
+- **Single timer in worker 0 only** (`ngx.worker.id() == 0` guard in
+  `monitor_worker.lua`); 10s tick, due-monitor scan via SQLite
+  `strftime` age compare, probes run concurrently with `ngx.thread`,
+  events written sequentially (FFI queries don't yield), notifications
+  fire on status change (prev ≠ new, so first check also notifies),
+  events pruned > 90 days hourly.
+- Notifications (`util/notify.lua`): webhook = JSON POST over cosocket,
+  email = reuse `util/smtp.lua` + global SMTP config. Verified live on
+  h2dev: all 5 check types (up + down paths), concurrent probing,
+  uptime %, pause/resume, channel assignment, and a real webhook POST
+  delivered to a local listener.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -494,7 +530,7 @@ Timer interval: 10 seconds (checks all monitors whose interval has elapsed). Eac
 
 **Uptime calculation:** `GET /api/monitors/:id` returns `uptime_24h`, `uptime_7d`, `uptime_30d` computed as percentage of `up` events over total events in each window.
 
-### 2.9 Applications API
+### 2.9 Applications API — DONE (catalog + install orchestration; guest provisioning deferred)
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -502,6 +538,24 @@ Timer interval: 10 seconds (checks all monitors whose interval has elapsed). Eac
 | `/api/apps/:id/install` | POST | Create VM from template with chosen resources |
 
 Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jellyfin, RoundCube/smtp2go, DokuWiki, Wekan. Each template includes: ISO URL, default resource allocation, post-install script that configures the service, and a default monitor definition (type, target path, expected status).
+
+**Implementation notes (2026-06-14):** Catalog seeded idempotently in
+`init.lua` (9 apps; `app_templates` gained `description` + `monitor_type/
+port/path/expected` columns). `POST /api/apps/:id/install {name, cpus?,
+ram_mb?, disk_gb?, volume?, ip_address?}` creates a VM from the template
+(defaults filled from the row), tags `vms.app_template`, and — when an IP
+is given — auto-creates the template's monitor (`http://<ip>:<port><path>`)
+linked via `vms.monitor_id`; deleting the VM cascades that monitor (§4.1).
+Apps page in Clay UI (catalog list + shared name/IP install form),
+`tools/uitest/test-apps.mjs` (catalog renders, one-click Seafile install,
+VM appears on VMs page, cleanup). **Deferred (the genuinely hard part):**
+fetching/staging guest ISOs, unattended OS install, and running the
+`post_install_script` inside the guest — needs the VM LAN bridge first
+(installed apps aren't reachable until then; see §2.7). **Fixed a
+foundational bug:** `util/db.lua` bound params via `ipairs`/`#`, which stop
+at the first `nil` — an optional column left NULL silently truncated every
+later bind (mac/app_template were being dropped). Now uses `select('#',...)`
+(LuaJIT here has no `table.pack`).
 
 ---
 
@@ -538,7 +592,7 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 - Polling every 5s for dashboard metrics (or WebSocket for live updates later)
 - Style reference: TrueNAS SCALE — dark sidebar nav, card-based dashboard, data tables
 
-**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303 (STRING_POOL_SIZE now 98304). Remaining pages (Monitoring, VMs, Apps, Settings) are placeholders.
+**Status:** Dashboard page DONE (system/CPU/memory/volumes/disks cards, 5s polling). Login/setup flow DONE — JS owns screen transitions and API calls, C renders screens; setup wizard shows scannable TOTP QR code plus manual secret fallback; expired one-time tokens restart the flow. Accounts page DONE — users table (SSH toggle, keygen download, two-click delete), groups card with inline membership checkboxes; C queues packed page actions (low 4 bits action, rest row id) drained by JS each frame via `TakePageAction()`; accounts strings live in their own pool region (32768..49151). Storage page DONE — volume cards (usage gauge, scrub now, auto-scrub toggle, two-click delete), disk list with free-disk checkboxes + create form; storage strings at 49152..65535. Network page DONE — IP config card (live address, DHCP/static mode toggle, two-click Apply since netif restart can drop the session) + Time card (timezone, NTP server with empty-to-disable); network strings at 65536..81919; page-action packing widened from 4 to 6 bits for the new action codes. Backup page DONE — snapshots card (per-volume snapshot-now, retention tags, two-click delete, auto-snapshot toggle), S3 card (bucket rows with backup-now/browse/delete, status line polled every 2s while a sync runs, add-bucket form with masked secret inputs), restore browser card (pseudo-root lists volumes as directories, `../` navigation); backup strings at 81920..98303. Monitoring page DONE — summary card (up/down/paused + 24h uptime), monitors card (status dot, type·target, uptime%/last-response, Pause/Resume, two-click delete, expandable per-monitor notification-channel checkboxes, add form with type-cycle button + interval), notification-channels card (add with type-cycle email/webhook + target, two-click delete); page live-refreshes every 5s; monitoring strings at 98304..114687 (STRING_POOL_SIZE now 114688); page actions 27..35. VMs page DONE — VM list (status dot, spec, lifecycle buttons that switch by state: Start/Delete when stopped, Suspend/Stop when running, Resume/Stop when suspended) + create form (name/vCPU/RAM/disk); live-refreshes every 5s (paused while a form field is focused, so the refresh can't drop keystrokes); VM strings at 114688..131071 (STRING_POOL_SIZE now 131072); page actions 36..41. Apps page DONE — install catalog (one shared "install as" name + optional static-IP form, per-app rows with description/defaults + Install button); app strings at 131072..147455 (STRING_POOL_SIZE now 147456); page action 42. The VMs/Monitoring/Apps live-refresh pauses while a form field is focused or a form has unsaved content, so the 5s rebuild can't drop keystrokes. Remaining page (Settings) is a placeholder.
 
 ---
 
@@ -612,9 +666,9 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 | 7 | Accounts API + UI | 3 | ✅ done |
 | 8 | Storage API + UI (HAMMER2 multi-volume) | 3 | ✅ done |
 | 9 | Backup API + UI (snapshots, CryFS, S3) | 8 | ✅ done (live-source backup; restore/share + config import/export deferred) |
-| 10 | VM API + UI (QEMU/NVMM) | 8 | — |
-| 11 | App templates + one-click install | 10 | — |
-| 12 | Monitoring system + UI | 3 | — |
+| 10 | VM API + UI (QEMU/NVMM) | 8 | ✅ done (console + LAN bridge deferred) |
+| 11 | App templates + one-click install | 10 | ✅ done (catalog + VM-from-template; guest OS provisioning deferred) |
+| 12 | Monitoring system + UI | 3 | ✅ done (raw cosockets; dashboard summary card deferred) |
 | 13 | Installer script | All | ◐ install.sh exists, needs rework for current layout |
 | 14 | Testing & hardening | All | — |
 
@@ -630,6 +684,64 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 
 ## Progress Log
 
+- **2026-06-14 (latest)**: Step 11 done. App catalog (9 templates seeded
+  in init.lua) + `api/apps.lua` (list + install = VM-from-template with
+  auto-monitor linked via `vms.monitor_id`, cascaded on VM delete), Apps
+  page in Clay UI, `tools/uitest/test-apps.mjs` (one-click Seafile install
+  → VM on VMs page → cleanup, green). **Found+fixed a foundational bug:**
+  `util/db.lua` bound params with `ipairs`/`#`, truncating at the first
+  `nil` — an optional NULL column silently dropped all later binds (mac,
+  app_template, ip_address). Switched to `select('#', ...)` (`table.pack`
+  is absent in this LuaJIT — its absence crashed `init_by_lua`, caught via
+  error.log). Also hardened the VMs/Monitoring auto-refresh to pause while
+  a form is focused or has content (the 5s rebuild was racing UI clicks/
+  keystrokes). Real guest provisioning (ISO + unattended install +
+  post-install script) deferred — needs the VM LAN bridge. Caveat: the
+  puppeteer tunnel (`ssh -f -L 8443`) drops intermittently in this
+  sandbox and masquerades as UI failures — run the tunnel and the test in
+  one shell (`ssh -N -L … & … ; kill $!`) for reliable results.
+- **2026-06-14 (later)**: Step 10 done. VM hosting on QEMU 9.2 + NVMM
+  (DragonFly ships `/boot/kernel/nvmm.ko`; works nested on h2dev since
+  the Linux host has `kvm_intel nested=Y` and launches it `-cpu host`).
+  Helper commands `vmcreate`/`vmstart`/`vmstop`/`vmdelete`; QMP control
+  from Lua (`util/qmp.lua`); `api/vms.lua` (CRUD + start/stop/suspend/
+  resume, live QMP status); VMs page in Clay UI; `tools/uitest/test-vms.mjs`
+  (create→start→suspend→resume→stop→delete, all green). Gotchas:
+  (1) `qemu -daemonize` rejects `-nographic` — use `-display none`;
+  (2) QEMU creates the QMP unix socket 0750 regardless of umask, so www
+  (flynas group) can't connect() — helper makes the run dir setgid-flynas
+  and chmods sockets 0770 after launch; (3) don't gate live status on the
+  pidfile (QEMU writes it 0600 root, www can't read) — use QMP reachability;
+  (4) the 5s page auto-refresh races puppeteer clicks and can drop
+  keystrokes mid-form — refresh now pauses while an input is focused, and
+  tests settle ~800ms between click and assert; (5) `pkg` left qemu
+  half-installed after a disk-full abort (7.9G of stale `/var/crash` dumps)
+  — `pkg install -fy qemu` to repair, `df` only after `sync`. See
+  [[nvmm-qemu-virtualization]]. NVMM persistence across reboot
+  (`nvmm_load="YES"` in loader.conf) is an installer TODO; the helper
+  kldloads it on demand meanwhile.
+- **2026-06-14**: Step 12 done. Monitoring system — `util/probe.lua` (5
+  check types: http/keyword via raw cosocket GET, tcp connect,
+  ping/dns via `resty.shell` argv), `util/notify.lua` (webhook
+  cosocket POST + email via smtp), `monitor_worker.lua`
+  (`init_worker_by_lua`, worker-0-only 10s `ngx.timer.every`,
+  concurrent `ngx.thread` probes, status-change notifications, 90-day
+  prune), `api/monitors.lua` (monitors CRUD + pause/resume + history +
+  summary + uptime windows; notification-channel CRUD; per-monitor
+  channel assignment), nginx `init_worker_by_lua_file`, router wiring,
+  Monitoring page in Clay UI, `tools/uitest/test-monitoring.mjs`.
+  Verified end-to-end on h2dev: all 5 check types (up+down), webhook
+  delivered to a local listener, full UI flow green. Gotchas: (1) box
+  has no `lua-resty-http` — hand-rolled HTTP over `ngx.socket.tcp`;
+  (2) `resty.shell` argv form keeps ping/dns injection-safe and
+  non-blocking in the timer; (3) the page's 5s live-refresh races with
+  puppeteer's instant clicks — UI tests need short settle sleeps
+  between click and assertion (real users rarely hit the 120ms
+  window). Deferred: dashboard compact monitor-summary card (§4.1),
+  response-time sparkline + 90-day uptime grid, monitor history
+  pagination UI. `pkill -f 'ssh … 8443'` self-kills the agent shell
+  (matches its own command line, exit 144) — gate the tunnel with a
+  `curl` health check instead.
 - **2026-06-12 (evening)**: Step 9 done. Backup API (snapshots CRUD + schedule, S3 bucket CRUD, sync trigger + status, restore browse), helper snapcreate/snapdelete/snaplist/backupsync, `scripts/backup-sync.sh`, `cron/hourly-snapshots.sh`, Backup page in Clay UI, `tools/uitest/test-backup.mjs`. cryfs-batch cross-compiles for DragonFly (`GOOS=dragonfly go build`, static binary); rclone installed from pkg. **Kernel panic found**: mounting a snapshot PFS of a multi-volume HAMMER2 panics 6.4 (`hammer2_base_delete` during flush) — backup now reads the live mountpoint instead; needs a kernel-side fix before point-in-time backups (candidate bug for the hammer2-raid6 harness). Gotchas: (1) daemons spawned via the setuid helper inherited nginx's listen sockets — after a netif restart, dhclient held ports 80/443 and nginx couldn't start; fixed with `closefrom(3)` in the helper, stale deployments need `pkill dhclient`; (2) cjson escapes `/` and randomizes key order — the sync job file is key=value lines, not JSON; (3) Clay UI: a button whose label duplicates a nearby title breaks text-targeted UI tests (S3 card title renamed "New bucket"); (4) panic recovery: QMP `system_reset`, then fsck `/dev/vbd0s1d` from single-user over the serial socket. Test volume/users/buckets removed from h2dev afterwards (fstab discipline).
 - **2026-06-12 (later)**: Step 6 done. Network API (config/timezone/ntp) + helper commands (`netconfig`/`timezone`/`ntp`) + Network page in Clay UI. Verified on h2dev: DHCP→static→DHCP round-trip survives netif restart (slirp re-DHCPs), timezone EDT/UTC round-trip, traversal rejected, NTP enable/disable. Plan changes: dntpd not ntpd (server in rc.conf `dntpd_flags`); `/etc/localtime` is a copy not symlink (+ `/var/db/zoneinfo`). Gotchas: `service X stop` refuses once `X_enable="NO"` — use `onestop`; UI tests need preconditions seeded (tank volume, testuser1/testgrp) and poll-based waits (newfs can take 20s, /api/disks smartctl probes are slow).
 - **2026-06-12**: Steps 7+8 done. Accounts: keypair endpoint, Accounts page (users/groups/membership/SSH/keygen-download), verified in headless Chrome. Storage: helper volcreate/voldestroy/scrub/vollist, storage API, Storage page (disk picker, create/delete/scrub), verified end-to-end on vbd1–vbd4. Found+fixed: (1) user/group DELETE silently failed via user_groups FK (no cascade); (2) **LuaJIT `pipe:close()` on this platform always returns true** — all helper exit codes were swallowed; exec.lua/users.lua now append an in-band `EXIT:<code>` marker. Plan change: no `volume-add`/`volume-del` on DragonFly 6.4 (open question 3 resolved). Test volumes removed from h2dev afterwards — fstab entries pointing at harness scratch disks would break boot when the harness regenerates them.
@@ -639,5 +751,5 @@ Pre-built templates for: Seafile, CryptPad, Forgejo, VaultWarden, Readeck, Jelly
 ## Open Questions
 
 1. **Seafile on DragonFlyBSD VM**: Seafile typically runs on Linux. The VM approach (QEMU/NVMM with a Linux guest) handles this, but need to create/test the post-install automation scripts.
-2. **Tap networking for VMs**: Need to configure bridge interface and tap devices. Verify DragonFlyBSD bridge/tap support and document setup.
+2. ~~**Tap networking for VMs**~~: RESOLVED 2026-06-14 — `if_tap` + `if_bridge` work on 6.4 (`ifconfig tap0/bridge0 create` succeed). Each VM gets `tap<1000+id>`, brought up by the helper. Still TODO: bridge the tap to the physical NIC for LAN access (deferred to avoid dropping the host link; see §2.7).
 3. ~~**HAMMER2 volume-del behavior**~~: RESOLVED 2026-06-12 — `volume-add`/`volume-del` do not exist in DragonFly 6.4's hammer2(8). Volume disk sets are fixed at creation; see §2.5.

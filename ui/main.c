@@ -58,8 +58,10 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 // 0..12287 dashboard (reset each poll), 12288..16383 auth strings,
 // 16384..32767 QR code data URL, 32768..49151 accounts page,
 // 49152..65535 storage page, 65536..81919 network page,
-// 81920..98303 backup page — keep in sync with index.html
-#define STRING_POOL_SIZE 98304
+// 81920..98303 backup page, 98304..114687 monitoring page,
+// 114688..131071 VMs page, 131072..147455 apps page
+// — keep in sync with index.html
+#define STRING_POOL_SIZE 147456
 
 typedef struct {
     Clay_String name;
@@ -247,6 +249,22 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_S3_BACKUP       24
 #define PACT_S3_BROWSE       25
 #define PACT_BROWSE_NAV      26
+#define PACT_MON_ADD         27
+#define PACT_MON_DELETE      28
+#define PACT_MON_PAUSE       29
+#define PACT_MON_TYPE        30
+#define PACT_MON_SELECT      31
+#define PACT_CHAN_TOGGLE     32
+#define PACT_CHAN_ADD        33
+#define PACT_CHAN_DELETE     34
+#define PACT_CHAN_TYPE       35
+#define PACT_VM_CREATE       36
+#define PACT_VM_DELETE       37
+#define PACT_VM_START        38
+#define PACT_VM_STOP         39
+#define PACT_VM_SUSPEND      40
+#define PACT_VM_RESUME       41
+#define PACT_APP_INSTALL     42
 // Low 6 bits = action code, remaining bits = row id
 #define PACT_PACK(action, arg) ((action) | ((arg) << 6))
 
@@ -673,6 +691,258 @@ void SetNetMsg(uint32_t errOff, uint32_t errLen,
                uint32_t infoOff, uint32_t infoLen) {
     netError = poolString(errOff, errLen);
     netInfo = poolString(infoOff, infoLen);
+}
+
+// ---------------------------------------------------------------
+// Monitoring page state, same JS-feeds-C pattern. A monitor row can
+// be expanded (monSelected) to assign notification channels via
+// inline checkboxes, like group membership on the Accounts page.
+// ---------------------------------------------------------------
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String type;      // "http", "tcp", ...
+    Clay_String target;
+    Clay_String status;    // "up", "down", "paused", "pending"
+    Clay_String detail;    // "uptime 99% · 12 ms" formatted in JS
+    bool enabled;
+} MonRow;
+
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String type;      // "email" | "webhook"
+    Clay_String detail;    // recipient or url
+    bool assigned;         // to the currently selected monitor
+} ChanRow;
+
+static MonRow monRows[MAX_ROWS];
+static int monRowCount = 0;
+static ChanRow chanRows[MAX_ROWS];
+static int chanRowCount = 0;
+static int monUp = 0, monDown = 0, monPaused = 0;
+static Clay_String monSummary;
+static int monSelected = 0;        // expanded monitor id, 0 = none
+// add-monitor form: name, target, interval, type-cycle label
+static Clay_String monInName, monInTarget, monInInterval, monAddType;
+// add-channel form: name, detail (to/url), type-cycle label
+static Clay_String chanInName, chanInDetail, chanAddType;
+static Clay_String monError, monInfo;
+static int monPendingDeleteMon = 0;
+static int monPendingDeleteChan = 0;
+
+CLAY_WASM_EXPORT("ClearMonitors") void ClearMonitors(void) {
+    monRowCount = 0;
+    monPendingDeleteMon = 0;
+}
+
+CLAY_WASM_EXPORT("AddMonitor")
+void AddMonitor(int id,
+                uint32_t nameOff, uint32_t nameLen,
+                uint32_t typeOff, uint32_t typeLen,
+                uint32_t targetOff, uint32_t targetLen,
+                uint32_t statusOff, uint32_t statusLen,
+                uint32_t detailOff, uint32_t detailLen,
+                bool enabled) {
+    if (monRowCount >= MAX_ROWS) return;
+    monRows[monRowCount++] = (MonRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .type = poolString(typeOff, typeLen),
+        .target = poolString(targetOff, targetLen),
+        .status = poolString(statusOff, statusLen),
+        .detail = poolString(detailOff, detailLen),
+        .enabled = enabled,
+    };
+}
+
+CLAY_WASM_EXPORT("ClearChannels") void ClearChannels(void) {
+    chanRowCount = 0;
+    monPendingDeleteChan = 0;
+}
+
+CLAY_WASM_EXPORT("AddChannel")
+void AddChannel(int id, uint32_t nameOff, uint32_t nameLen,
+                uint32_t typeOff, uint32_t typeLen,
+                uint32_t detailOff, uint32_t detailLen,
+                bool assigned) {
+    if (chanRowCount >= MAX_ROWS) return;
+    chanRows[chanRowCount++] = (ChanRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .type = poolString(typeOff, typeLen),
+        .detail = poolString(detailOff, detailLen),
+        .assigned = assigned,
+    };
+}
+
+CLAY_WASM_EXPORT("SetMonSummary")
+void SetMonSummary(int up, int down, int paused,
+                   uint32_t lineOff, uint32_t lineLen, int selected) {
+    monUp = up;
+    monDown = down;
+    monPaused = paused;
+    monSummary = poolString(lineOff, lineLen);
+    monSelected = selected;
+}
+
+CLAY_WASM_EXPORT("SetMonInputs")
+void SetMonInputs(uint32_t nOff, uint32_t nLen,
+                  uint32_t tOff, uint32_t tLen,
+                  uint32_t iOff, uint32_t iLen,
+                  uint32_t mtOff, uint32_t mtLen,
+                  uint32_t cnOff, uint32_t cnLen,
+                  uint32_t cdOff, uint32_t cdLen,
+                  uint32_t ctOff, uint32_t ctLen) {
+    monInName = poolString(nOff, nLen);
+    monInTarget = poolString(tOff, tLen);
+    monInInterval = poolString(iOff, iLen);
+    monAddType = poolString(mtOff, mtLen);
+    chanInName = poolString(cnOff, cnLen);
+    chanInDetail = poolString(cdOff, cdLen);
+    chanAddType = poolString(ctOff, ctLen);
+}
+
+CLAY_WASM_EXPORT("SetMonMsg")
+void SetMonMsg(uint32_t errOff, uint32_t errLen,
+               uint32_t infoOff, uint32_t infoLen) {
+    monError = poolString(errOff, errLen);
+    monInfo = poolString(infoOff, infoLen);
+}
+
+void HandleMonDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int mid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (monPendingDeleteMon == mid) {
+            pendingPageAction = PACT_PACK(PACT_MON_DELETE, mid);
+            monPendingDeleteMon = 0;
+        } else {
+            monPendingDeleteMon = mid;
+        }
+    }
+}
+
+void HandleChanDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int cid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (monPendingDeleteChan == cid) {
+            pendingPageAction = PACT_PACK(PACT_CHAN_DELETE, cid);
+            monPendingDeleteChan = 0;
+        } else {
+            monPendingDeleteChan = cid;
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// VMs page state, same JS-feeds-C pattern.
+// ---------------------------------------------------------------
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String spec;     // "1 vCPU · 256 MB · 1 GB" formatted in JS
+    Clay_String status;   // "running" | "stopped" | "suspended"
+} VmRow;
+
+static VmRow vmRows[MAX_ROWS];
+static int vmRowCount = 0;
+// add-VM form: name, cpus, ram_mb, disk_gb
+static Clay_String vmInName, vmInCpus, vmInRam, vmInDisk;
+static Clay_String vmError, vmInfo;
+static int vmPendingDelete = 0;
+
+CLAY_WASM_EXPORT("ClearVms") void ClearVms(void) {
+    vmRowCount = 0;
+    vmPendingDelete = 0;
+}
+
+CLAY_WASM_EXPORT("AddVm")
+void AddVm(int id, uint32_t nameOff, uint32_t nameLen,
+           uint32_t specOff, uint32_t specLen,
+           uint32_t statusOff, uint32_t statusLen) {
+    if (vmRowCount >= MAX_ROWS) return;
+    vmRows[vmRowCount++] = (VmRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .spec = poolString(specOff, specLen),
+        .status = poolString(statusOff, statusLen),
+    };
+}
+
+CLAY_WASM_EXPORT("SetVmInputs")
+void SetVmInputs(uint32_t nOff, uint32_t nLen,
+                 uint32_t cOff, uint32_t cLen,
+                 uint32_t rOff, uint32_t rLen,
+                 uint32_t dOff, uint32_t dLen) {
+    vmInName = poolString(nOff, nLen);
+    vmInCpus = poolString(cOff, cLen);
+    vmInRam = poolString(rOff, rLen);
+    vmInDisk = poolString(dOff, dLen);
+}
+
+CLAY_WASM_EXPORT("SetVmMsg")
+void SetVmMsg(uint32_t errOff, uint32_t errLen,
+              uint32_t infoOff, uint32_t infoLen) {
+    vmError = poolString(errOff, errLen);
+    vmInfo = poolString(infoOff, infoLen);
+}
+
+void HandleVmDelete(Clay_ElementId elementId, Clay_PointerData pointerInfo, void *userData) {
+    int vid = (int)(intptr_t)userData;
+    if (pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) {
+        if (vmPendingDelete == vid) {
+            pendingPageAction = PACT_PACK(PACT_VM_DELETE, vid);
+            vmPendingDelete = 0;
+        } else {
+            vmPendingDelete = vid;
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// Apps page state (install catalog). One name/IP input pair is shared
+// by all cards; clicking a card's Install uses it.
+// ---------------------------------------------------------------
+typedef struct {
+    int id;
+    Clay_String name;
+    Clay_String desc;
+    Clay_String spec;     // "2 vCPU · 2048 MB · 40 GB" formatted in JS
+} AppRow;
+
+static AppRow appRows[MAX_ROWS];
+static int appRowCount = 0;
+static Clay_String appInName, appInIp;
+static Clay_String appError, appInfo;
+
+CLAY_WASM_EXPORT("ClearApps") void ClearApps(void) {
+    appRowCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddApp")
+void AddApp(int id, uint32_t nameOff, uint32_t nameLen,
+            uint32_t descOff, uint32_t descLen,
+            uint32_t specOff, uint32_t specLen) {
+    if (appRowCount >= MAX_ROWS) return;
+    appRows[appRowCount++] = (AppRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .desc = poolString(descOff, descLen),
+        .spec = poolString(specOff, specLen),
+    };
+}
+
+CLAY_WASM_EXPORT("SetAppInputs")
+void SetAppInputs(uint32_t nOff, uint32_t nLen, uint32_t ipOff, uint32_t ipLen) {
+    appInName = poolString(nOff, nLen);
+    appInIp = poolString(ipOff, ipLen);
+}
+
+CLAY_WASM_EXPORT("SetAppMsg")
+void SetAppMsg(uint32_t errOff, uint32_t errLen,
+               uint32_t infoOff, uint32_t infoLen) {
+    appError = poolString(errOff, errLen);
+    appInfo = poolString(infoOff, infoLen);
 }
 
 // ---------------------------------------------------------------
@@ -1539,6 +1809,370 @@ void AccountsPage(void) {
     }
 }
 
+// ---------------------------------------------------------------
+// Monitoring page
+// ---------------------------------------------------------------
+Clay_Color StatusColor(Clay_String s) {
+    if (s.length == 2 && s.chars[0] == 'u' && s.chars[1] == 'p') return COLOR_GOOD;
+    if (s.length == 4 && s.chars[0] == 'd') return COLOR_BAD;     // down
+    if (s.length == 6 && s.chars[0] == 'p' && s.chars[1] == 'a') return COLOR_MUTED; // paused
+    return COLOR_WARN;   // pending
+}
+
+void MonSummaryCard(void) {
+    CARD("MonSummaryCard") {
+        CLAY(CLAY_ID("MonSummaryRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 24,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CLAY_TEXT(monSummary, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 20, .textColor = COLOR_TEXT }));
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            CLAY_TEXT(CLAY_STRING("up"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_GOOD }));
+            CLAY_TEXT(CLAY_STRING("·"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+            CLAY_TEXT(CLAY_STRING("down"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+            CLAY_TEXT(CLAY_STRING("·"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+            CLAY_TEXT(CLAY_STRING("paused"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+    }
+}
+
+void MonitorsCard(void) {
+    CARD("MonitorsCard") {
+        CardTitle(CLAY_STRING("Monitors"));
+        if (monRowCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No monitors — add one below"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < monRowCount; i++) {
+            MonRow *m = &monRows[i];
+            bool open = (monSelected == m->id);
+            CLAY(CLAY_IDI("MonRowWrap", m->id), { .layout = {
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 6,
+            } }) {
+                CLAY(CLAY_IDI("MonRow", m->id), { .layout = {
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .childGap = 10,
+                    .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                } }) {
+                    CLAY_TEXT(CLAY_STRING("●"), CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 16,
+                        .textColor = StatusColor(m->status) }));
+                    CLAY(CLAY_IDI("MonName", m->id), {
+                        .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                    }) {
+                        Clay_OnHover(HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_MON_SELECT, m->id));
+                        CLAY_TEXT(m->name, CLAY_TEXT_CONFIG({
+                            .fontId = FONT_ID_MONO, .fontSize = 16,
+                            .textColor = open ? COLOR_ACCENT : COLOR_TEXT,
+                            .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                        }));
+                    }
+                    CLAY_TEXT(m->target, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                    CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                    CLAY_TEXT(m->detail, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                    SmallButton(CLAY_IDI("MonPause", m->id),
+                        m->enabled ? CLAY_STRING("Pause") : CLAY_STRING("Resume"),
+                        m->enabled ? COLOR_MUTED : COLOR_GOOD, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_MON_PAUSE, m->id));
+                    SmallButton(CLAY_IDI("MonDel", m->id),
+                        monPendingDeleteMon == m->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                        COLOR_BAD, HandleMonDelete, (void *)(intptr_t)m->id);
+                }
+                if (open) {
+                    CLAY(CLAY_IDI("MonChans", m->id), { .layout = {
+                        .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                        .sizing = { .width = CLAY_SIZING_GROW(0) },
+                        .padding = { 26, 0, 2, 6 },
+                        .childGap = 4,
+                    } }) {
+                        CLAY_TEXT(CLAY_STRING("Notify channels:"), CLAY_TEXT_CONFIG({
+                            .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                        if (chanRowCount == 0) {
+                            CLAY_TEXT(CLAY_STRING("(none configured)"), CLAY_TEXT_CONFIG({
+                                .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                        }
+                        for (int j = 0; j < chanRowCount; j++) {
+                            ChanRow *c = &chanRows[j];
+                            CLAY(CLAY_IDI("MonChan", c->id), {
+                                .layout = {
+                                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                                    .childGap = 8,
+                                },
+                                .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                            }) {
+                                Clay_OnHover(HandlePageButton,
+                                    (void *)(intptr_t)PACT_PACK(PACT_CHAN_TOGGLE, c->id));
+                                CLAY_TEXT(c->assigned ? CLAY_STRING("[x]") : CLAY_STRING("[ ]"),
+                                    CLAY_TEXT_CONFIG({
+                                        .fontId = FONT_ID_MONO, .fontSize = 15,
+                                        .textColor = c->assigned ? COLOR_ACCENT : COLOR_MUTED,
+                                        .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                                    }));
+                                CLAY_TEXT(c->name, CLAY_TEXT_CONFIG({
+                                    .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT,
+                                    .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Add-monitor form
+        CLAY(CLAY_ID("MonAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            TextInputBox(CLAY_ID("MonName"), monInName, CLAY_STRING("name"), 13);
+            SmallButton(CLAY_ID("MonType"), monAddType, COLOR_ACCENT, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_MON_TYPE, 0));
+            TextInputBox(CLAY_ID("MonTarget"), monInTarget,
+                CLAY_STRING("https://host/ or host:port"), 14);
+            TextInputBox(CLAY_ID("MonInterval"), monInInterval, CLAY_STRING("60s"), 15);
+            SmallButton(CLAY_ID("MonAddBtn"), CLAY_STRING("Add"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_MON_ADD, 0));
+        }
+    }
+}
+
+void ChannelsCard(void) {
+    CLAY(CLAY_ID("ChannelsCard"), {
+        .layout = {
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .sizing = { .width = CLAY_SIZING_FIXED(400) },
+            .padding = CLAY_PADDING_ALL(20),
+            .childGap = 12,
+        },
+        .backgroundColor = COLOR_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = COLOR_CARD_EDGE, .width = { 1, 1, 1, 1 } },
+    }) {
+        CardTitle(CLAY_STRING("Notification channels"));
+        if (chanRowCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No channels configured"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < chanRowCount; i++) {
+            ChanRow *c = &chanRows[i];
+            CLAY(CLAY_IDI("ChanRow", c->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 8,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY_TEXT(c->name, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT }));
+                CLAY_TEXT(c->type, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_ACCENT }));
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                CLAY_TEXT(c->detail, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 12, .textColor = COLOR_MUTED }));
+                SmallButton(CLAY_IDI("ChanDel", c->id),
+                    monPendingDeleteChan == c->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                    COLOR_BAD, HandleChanDelete, (void *)(intptr_t)c->id);
+            }
+        }
+        CLAY(CLAY_ID("ChanAddName"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            TextInputBox(CLAY_ID("ChanName"), chanInName, CLAY_STRING("channel name"), 16);
+            SmallButton(CLAY_ID("ChanType"), chanAddType, COLOR_ACCENT, HandlePageButton,
+                (void *)(intptr_t)PACT_PACK(PACT_CHAN_TYPE, 0));
+        }
+        LabeledInput(CLAY_STRING("Target"), CLAY_ID("ChanDetail"),
+            chanInDetail, CLAY_STRING("email or webhook URL"), 17);
+        CLAY(CLAY_ID("ChanAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 10 } }) {
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+            SmallButton(CLAY_ID("ChanAddBtn"), CLAY_STRING("Add channel"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_CHAN_ADD, 0));
+        }
+    }
+}
+
+void MonitoringPage(void) {
+    MonSummaryCard();
+    CLAY(CLAY_ID("MonitoringRow"), { .layout = {
+        .sizing = { .width = CLAY_SIZING_GROW(0) }, .childGap = 16 } }) {
+        MonitorsCard();
+        ChannelsCard();
+    }
+    if (monError.length > 0) {
+        CLAY_TEXT(monError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+    }
+    if (monInfo.length > 0) {
+        CLAY_TEXT(monInfo, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_GOOD }));
+    }
+}
+
+// ---------------------------------------------------------------
+// VMs page
+// ---------------------------------------------------------------
+static bool cs_eq(Clay_String s, const char *lit) {
+    int n = 0;
+    while (lit[n]) n++;
+    if (s.length != n) return false;
+    for (int i = 0; i < n; i++)
+        if (s.chars[i] != lit[i]) return false;
+    return true;
+}
+
+Clay_Color VmStatusColor(Clay_String s) {
+    if (cs_eq(s, "running")) return COLOR_GOOD;
+    if (cs_eq(s, "suspended")) return COLOR_WARN;
+    return COLOR_MUTED;   // stopped
+}
+
+void VmsCard(void) {
+    CARD("VmsCard") {
+        CardTitle(CLAY_STRING("Virtual machines"));
+        if (vmRowCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No VMs — create one below"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < vmRowCount; i++) {
+            VmRow *v = &vmRows[i];
+            bool running = cs_eq(v->status, "running");
+            bool suspended = cs_eq(v->status, "suspended");
+            bool stopped = !running && !suspended;
+            CLAY(CLAY_IDI("VmRow", v->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 10,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY_TEXT(CLAY_STRING("●"), CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 16,
+                    .textColor = VmStatusColor(v->status) }));
+                CLAY_TEXT(v->name, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 16, .textColor = COLOR_TEXT }));
+                CLAY_TEXT(v->spec, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                CLAY_TEXT(v->status, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14,
+                    .textColor = VmStatusColor(v->status) }));
+                if (running) {
+                    SmallButton(CLAY_IDI("VmSuspend", v->id), CLAY_STRING("Suspend"),
+                        COLOR_ACCENT, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VM_SUSPEND, v->id));
+                    SmallButton(CLAY_IDI("VmStop", v->id), CLAY_STRING("Stop"),
+                        COLOR_WARN, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VM_STOP, v->id));
+                } else if (suspended) {
+                    SmallButton(CLAY_IDI("VmResume", v->id), CLAY_STRING("Resume"),
+                        COLOR_GOOD, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VM_RESUME, v->id));
+                    SmallButton(CLAY_IDI("VmStop", v->id), CLAY_STRING("Stop"),
+                        COLOR_WARN, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VM_STOP, v->id));
+                } else {
+                    SmallButton(CLAY_IDI("VmStart", v->id), CLAY_STRING("Start"),
+                        COLOR_GOOD, HandlePageButton,
+                        (void *)(intptr_t)PACT_PACK(PACT_VM_START, v->id));
+                    SmallButton(CLAY_IDI("VmDel", v->id),
+                        vmPendingDelete == v->id ? CLAY_STRING("Confirm?") : CLAY_STRING("Delete"),
+                        COLOR_BAD, HandleVmDelete, (void *)(intptr_t)v->id);
+                }
+            }
+        }
+        // Add-VM form
+        CLAY(CLAY_ID("VmAddRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            TextInputBox(CLAY_ID("VmName"), vmInName, CLAY_STRING("name"), 18);
+            TextInputBox(CLAY_ID("VmCpus"), vmInCpus, CLAY_STRING("vCPU"), 19);
+            TextInputBox(CLAY_ID("VmRam"), vmInRam, CLAY_STRING("RAM MB"), 20);
+            TextInputBox(CLAY_ID("VmDisk"), vmInDisk, CLAY_STRING("disk GB"), 21);
+            SmallButton(CLAY_ID("VmAddBtn"), CLAY_STRING("Create"), COLOR_ACCENT,
+                HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_VM_CREATE, 0));
+        }
+    }
+}
+
+void VmsPage(void) {
+    VmsCard();
+    if (vmError.length > 0) {
+        CLAY_TEXT(vmError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+    }
+    if (vmInfo.length > 0) {
+        CLAY_TEXT(vmInfo, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_GOOD }));
+    }
+}
+
+// ---------------------------------------------------------------
+// Apps page
+// ---------------------------------------------------------------
+void AppsCard(void) {
+    CARD("AppsCard") {
+        CardTitle(CLAY_STRING("App catalog"));
+        // Shared install target: VM name + optional static IP
+        CLAY(CLAY_ID("AppInstallRow"), { .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0) },
+            .childGap = 10,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        } }) {
+            CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_FIXED(70) } } }) {
+                CLAY_TEXT(CLAY_STRING("Install as"), CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+            }
+            TextInputBox(CLAY_ID("AppName"), appInName, CLAY_STRING("VM name"), 22);
+            TextInputBox(CLAY_ID("AppIp"), appInIp, CLAY_STRING("static IP (optional)"), 23);
+        }
+        for (int i = 0; i < appRowCount; i++) {
+            AppRow *a = &appRows[i];
+            CLAY(CLAY_IDI("AppRow", a->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 12,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_FIXED(110) } } }) {
+                    CLAY_TEXT(a->name, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_TEXT }));
+                }
+                CLAY_TEXT(a->desc, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_MUTED }));
+                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                CLAY_TEXT(a->spec, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_BODY, .fontSize = 13, .textColor = COLOR_MUTED }));
+                SmallButton(CLAY_IDI("AppInstall", a->id), CLAY_STRING("Install"),
+                    COLOR_ACCENT, HandlePageButton,
+                    (void *)(intptr_t)PACT_PACK(PACT_APP_INSTALL, a->id));
+            }
+        }
+    }
+}
+
+void AppsPage(void) {
+    AppsCard();
+    if (appError.length > 0) {
+        CLAY_TEXT(appError, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
+    }
+    if (appInfo.length > 0) {
+        CLAY_TEXT(appInfo, CLAY_TEXT_CONFIG({
+            .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_GOOD }));
+    }
+}
+
 void PlaceholderPage(void) {
     CLAY(CLAY_ID("Placeholder"), { .layout = {
         .sizing = { .width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(200) },
@@ -1771,6 +2405,8 @@ Clay_RenderCommandArray CreateLayout(float deltaTime) {
             }) {
                 if (activePage == 0) {
                     DashboardPage();
+                } else if (activePage == 1) {
+                    MonitoringPage();
                 } else if (activePage == 2) {
                     NetworkPage();
                 } else if (activePage == 3) {
@@ -1779,6 +2415,10 @@ Clay_RenderCommandArray CreateLayout(float deltaTime) {
                     StoragePage();
                 } else if (activePage == 5) {
                     BackupPage();
+                } else if (activePage == 6) {
+                    VmsPage();
+                } else if (activePage == 7) {
+                    AppsPage();
                 } else {
                     PlaceholderPage();
                 }

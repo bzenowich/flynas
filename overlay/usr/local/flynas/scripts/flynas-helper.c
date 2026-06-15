@@ -21,6 +21,8 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <grp.h>
 
 #define MAX_NAME_LEN 32
 #define MAX_SHELL_LEN 64
@@ -755,6 +757,286 @@ static int do_ntp(const char *server)
     return 0;
 }
 
+/* ---- Virtual machines (QEMU + NVMM) -------------------------- */
+
+#define QEMU_CMD "/usr/local/bin/qemu-system-x86_64"
+#define QEMU_IMG_CMD "/usr/local/bin/qemu-img"
+#define KLDLOAD_CMD "/sbin/kldload"
+#define IFCONFIG_CMD "/sbin/ifconfig"
+#define VM_RUN_DIR "/var/run/flynas"
+#define VM_SYS_DIR "/usr/local/flynas/vms"
+
+/* unsigned integer in [min,max] */
+static int valid_uint(const char *s, long min, long max)
+{
+    char *end;
+    long v;
+
+    if (!s || !*s)
+        return 0;
+    for (const char *p = s; *p; p++)
+        if (!isdigit((unsigned char)*p))
+            return 0;
+    v = strtol(s, &end, 10);
+    return (*end == '\0' && v >= min && v <= max);
+}
+
+/* MAC: xx:xx:xx:xx:xx:xx (hex) */
+static int valid_mac(const char *s)
+{
+    if (!s || strlen(s) != 17)
+        return 0;
+    for (int i = 0; i < 17; i++) {
+        if ((i % 3) == 2) {
+            if (s[i] != ':')
+                return 0;
+        } else if (!isxdigit((unsigned char)s[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* tap name: ^tap[0-9]+$ */
+static int valid_tap(const char *s)
+{
+    if (!s || strncmp(s, "tap", 3) != 0 || !s[3])
+        return 0;
+    for (const char *p = s + 3; *p; p++)
+        if (!isdigit((unsigned char)*p))
+            return 0;
+    return 1;
+}
+
+/* Path must live under /data/ or the system VM dir, no traversal,
+ * restricted charset. Used for disk images and ISOs. */
+static int valid_vmpath(const char *p)
+{
+    size_t len;
+
+    if (!p || !*p)
+        return 0;
+    len = strlen(p);
+    if (len >= 512 || strstr(p, ".."))
+        return 0;
+    if (strncmp(p, "/data/", 6) != 0 &&
+        strncmp(p, VM_SYS_DIR "/", strlen(VM_SYS_DIR) + 1) != 0)
+        return 0;
+    for (const char *c = p; *c; c++) {
+        if (!(isalnum((unsigned char)*c) || *c == '/' || *c == '.' ||
+              *c == '_' || *c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+/* Build the disk image path for <name> on <volume> ("-" = system dir).
+ * Verifies a data volume is actually mounted. */
+static void vm_image_path(const char *name, const char *volume,
+                          char *buf, size_t size)
+{
+    if (strcmp(volume, "-") == 0) {
+        snprintf(buf, size, "%s/%s.img", VM_SYS_DIR, name);
+    } else {
+        char mp[256];
+        struct statfs sb;
+        if (!valid_name(volume))
+            die("invalid volume");
+        snprintf(mp, sizeof(mp), "%s/%s", DATA_ROOT, volume);
+        if (statfs(mp, &sb) != 0 || strcmp(sb.f_mntonname, mp) != 0)
+            die("volume not mounted");
+        snprintf(buf, size, "%s/%s/vms/%s.img", DATA_ROOT, volume, name);
+    }
+}
+
+static void vm_paths(const char *name, char *sock, char *serial, char *pid,
+                     size_t size)
+{
+    snprintf(sock, size, "%s/vm-%s.sock", VM_RUN_DIR, name);
+    snprintf(serial, size, "%s/vm-%s.serial", VM_RUN_DIR, name);
+    snprintf(pid, size, "%s/vm-%s.pid", VM_RUN_DIR, name);
+}
+
+/* vmcreate <name> <gb> <volume|->: allocate a raw disk image */
+static int do_vmcreate(const char *name, const char *gb, const char *volume)
+{
+    char path[512], dir[512], size_arg[32];
+    char *p;
+
+    if (!valid_uint(gb, 1, 4096))
+        die("invalid disk size (GB)");
+    vm_image_path(name, volume, path, sizeof(path));
+
+    /* mkdir -p the parent directory */
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    p = strrchr(dir, '/');
+    if (p) {
+        *p = '\0';
+        mkdir(DATA_ROOT, 0755);   /* harmless if it exists */
+        mkdir(dir, 0755);
+    }
+    if (access(path, F_OK) == 0)
+        die("disk image already exists");
+
+    snprintf(size_arg, sizeof(size_arg), "%sG", gb);
+    char *args[] = { "qemu-img", "create", "-f", "raw", path, size_arg, NULL };
+    if (run(QEMU_IMG_CMD, args) != 0)
+        die("qemu-img create failed");
+    printf("%s\n", path);
+    return 0;
+}
+
+/* vmstart <name> <cpus> <ram_mb> <imagepath> <tap> <mac|-> <iso|->:
+ * load nvmm, bring up the tap, launch QEMU daemonized under NVMM. */
+static int do_vmstart(char *argv[])
+{
+    const char *name = argv[2], *cpus = argv[3], *ram = argv[4];
+    const char *image = argv[5], *tap = argv[6], *mac = argv[7], *iso = argv[8];
+    char sock[256], serial[256], pid[256];
+    char drivebuf[600], netbuf[128], devbuf[128];
+    char qmpbuf[300], serbuf[300];
+    struct stat st;
+
+    if (!valid_name(name)) die("invalid vm name");
+    if (!valid_uint(cpus, 1, 256)) die("invalid cpus");
+    if (!valid_uint(ram, 64, 1048576)) die("invalid ram");
+    if (!valid_vmpath(image) || stat(image, &st) != 0 || !S_ISREG(st.st_mode))
+        die("invalid disk image");
+    if (!valid_tap(tap)) die("invalid tap name");
+    if (strcmp(mac, "-") != 0 && !valid_mac(mac)) die("invalid mac");
+    if (strcmp(iso, "-") != 0 &&
+        (!valid_vmpath(iso) || stat(iso, &st) != 0 || !S_ISREG(st.st_mode)))
+        die("invalid iso path");
+
+    /* Run dir setgid-flynas + umask 007 so QEMU's QMP/serial unix
+     * sockets come out group-writable (mode 0770 root:flynas). nginx
+     * (www, in flynas) needs *write* on the socket file to connect(). */
+    mkdir(VM_RUN_DIR, 0770);
+    {
+        struct group *g = getgrnam("flynas");
+        if (g) chown(VM_RUN_DIR, 0, g->gr_gid);
+        chmod(VM_RUN_DIR, 02770);
+    }
+    umask(007);
+    vm_paths(name, sock, serial, pid, sizeof(sock));
+
+    /* Already running? */
+    if (access(pid, F_OK) == 0) {
+        FILE *pf = fopen(pid, "r");
+        long oldpid = 0;
+        if (pf) { if (fscanf(pf, "%ld", &oldpid) != 1) oldpid = 0; fclose(pf); }
+        if (oldpid > 0 && kill((pid_t)oldpid, 0) == 0)
+            die("vm already running");
+    }
+
+    /* NVMM accelerator (idempotent; ignore "already loaded") */
+    char *kld[] = { "kldload", "nvmm", NULL };
+    run(KLDLOAD_CMD, kld);
+
+    /* Bring up the tap (create may fail if it exists — tolerate) */
+    char *tc[] = { "ifconfig", (char *)tap, "create", NULL };
+    run(IFCONFIG_CMD, tc);
+    char *tu[] = { "ifconfig", (char *)tap, "up", NULL };
+    run(IFCONFIG_CMD, tu);
+
+    snprintf(drivebuf, sizeof(drivebuf),
+        "file=%s,format=raw,if=virtio", image);
+    snprintf(netbuf, sizeof(netbuf),
+        "tap,id=net0,ifname=%s,script=no,downscript=no", tap);
+    if (strcmp(mac, "-") == 0)
+        snprintf(devbuf, sizeof(devbuf), "virtio-net-pci,netdev=net0");
+    else
+        snprintf(devbuf, sizeof(devbuf), "virtio-net-pci,netdev=net0,mac=%s", mac);
+    snprintf(qmpbuf, sizeof(qmpbuf), "unix:%s,server,nowait", sock);
+    snprintf(serbuf, sizeof(serbuf), "unix:%s,server,nowait", serial);
+
+    char *a[40];
+    int n = 0;
+    a[n++] = "qemu-system-x86_64";
+    a[n++] = "-machine"; a[n++] = "type=q35,accel=nvmm";
+    a[n++] = "-m"; a[n++] = (char *)ram;
+    a[n++] = "-smp"; a[n++] = (char *)cpus;
+    a[n++] = "-drive"; a[n++] = drivebuf;
+    a[n++] = "-netdev"; a[n++] = netbuf;
+    a[n++] = "-device"; a[n++] = devbuf;
+    if (strcmp(iso, "-") != 0) {
+        a[n++] = "-cdrom"; a[n++] = (char *)iso;
+        a[n++] = "-boot"; a[n++] = "d";
+    }
+    a[n++] = "-qmp"; a[n++] = qmpbuf;
+    a[n++] = "-serial"; a[n++] = serbuf;
+    a[n++] = "-vga"; a[n++] = "none";
+    a[n++] = "-display"; a[n++] = "none";
+    a[n++] = "-daemonize"; a[n++] = "-pidfile"; a[n++] = pid;
+    a[n] = NULL;
+
+    if (run(QEMU_CMD, a) != 0)
+        die("qemu launch failed");
+
+    /* QEMU creates the QMP/serial unix sockets 0750 regardless of
+     * umask. Wait for them, then widen to 0770 so nginx (www, flynas
+     * group) can connect() — connect needs write on the socket. */
+    for (int i = 0; i < 30 && access(sock, F_OK) != 0; i++)
+        usleep(100000);
+    chmod(sock, 0770);
+    chmod(serial, 0770);
+    return 0;
+}
+
+/* vmstop <name> <tap>: force-stop a VM (graceful ACPI powerdown is
+ * attempted by the API over QMP first) and tear down its tap/sockets. */
+static int do_vmstop(const char *name, const char *tap)
+{
+    char sock[256], serial[256], pid[256];
+    FILE *pf;
+    long vmpid = 0;
+
+    if (!valid_name(name)) die("invalid vm name");
+    if (!valid_tap(tap)) die("invalid tap name");
+    vm_paths(name, sock, serial, pid, sizeof(sock));
+
+    pf = fopen(pid, "r");
+    if (pf) {
+        if (fscanf(pf, "%ld", &vmpid) != 1) vmpid = 0;
+        fclose(pf);
+    }
+    if (vmpid > 0 && kill((pid_t)vmpid, 0) == 0) {
+        kill((pid_t)vmpid, SIGTERM);
+        for (int i = 0; i < 30 && kill((pid_t)vmpid, 0) == 0; i++)
+            usleep(100000);          /* up to 3s for a clean exit */
+        if (kill((pid_t)vmpid, 0) == 0)
+            kill((pid_t)vmpid, SIGKILL);
+    }
+
+    char *td[] = { "ifconfig", (char *)tap, "destroy", NULL };
+    run(IFCONFIG_CMD, td);
+    unlink(sock);
+    unlink(serial);
+    unlink(pid);
+    return 0;
+}
+
+/* vmdelete <name> <volume|->: remove the disk image (VM must be stopped) */
+static int do_vmdelete(const char *name, const char *volume)
+{
+    char path[512], pid[256], sock[256], serial[256];
+
+    if (!valid_name(name)) die("invalid vm name");
+    vm_paths(name, sock, serial, pid, sizeof(sock));
+    if (access(pid, F_OK) == 0) {
+        FILE *pf = fopen(pid, "r");
+        long vmpid = 0;
+        if (pf) { if (fscanf(pf, "%ld", &vmpid) != 1) vmpid = 0; fclose(pf); }
+        if (vmpid > 0 && kill((pid_t)vmpid, 0) == 0)
+            die("vm is running");
+    }
+    vm_image_path(name, volume, path, sizeof(path));
+    if (access(path, F_OK) == 0 && unlink(path) != 0)
+        die("failed to remove disk image");
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     int rc;
@@ -973,6 +1255,28 @@ int main(int argc, char *argv[])
         if (argc != 3)
             die("usage: flynas-helper ntp <server>|off");
         rc = do_ntp(argv[2]);
+
+    } else if (strcmp(cmd, "vmcreate") == 0) {
+        if (argc != 5)
+            die("usage: flynas-helper vmcreate <name> <gb> <volume|->");
+        if (!valid_name(argv[2]))
+            die("invalid vm name");
+        rc = do_vmcreate(argv[2], argv[3], argv[4]);
+
+    } else if (strcmp(cmd, "vmstart") == 0) {
+        if (argc != 9)
+            die("usage: flynas-helper vmstart <name> <cpus> <ram_mb> <image> <tap> <mac|-> <iso|->");
+        rc = do_vmstart(argv);
+
+    } else if (strcmp(cmd, "vmstop") == 0) {
+        if (argc != 4)
+            die("usage: flynas-helper vmstop <name> <tap>");
+        rc = do_vmstop(argv[2], argv[3]);
+
+    } else if (strcmp(cmd, "vmdelete") == 0) {
+        if (argc != 4)
+            die("usage: flynas-helper vmdelete <name> <volume|->");
+        rc = do_vmdelete(argv[2], argv[3]);
 
     } else {
         die("unknown command");

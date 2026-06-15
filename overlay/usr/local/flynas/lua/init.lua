@@ -62,6 +62,40 @@ migrate_column("users", "is_admin", "INTEGER DEFAULT 0")
 -- Sessions table migration
 migrate_column("sessions", "state", "TEXT DEFAULT 'active'")
 
+-- VMs: which HAMMER2 volume holds the disk image (NULL = system dir)
+migrate_column("vms", "volume", "TEXT")
+-- VMs: which app template this VM was installed from (NULL = manual)
+migrate_column("vms", "app_template", "TEXT")
+
+-- App templates: description + default monitor definition
+migrate_column("app_templates", "description", "TEXT")
+migrate_column("app_templates", "monitor_type", "TEXT DEFAULT 'http'")
+migrate_column("app_templates", "monitor_port", "INTEGER")
+migrate_column("app_templates", "monitor_path", "TEXT DEFAULT '/'")
+migrate_column("app_templates", "monitor_expected", "INTEGER DEFAULT 200")
+
+-- Seed the app catalog (idempotent on the unique name). Each entry's
+-- monitor_* fields become the auto-created monitor when installed.
+local APP_CATALOG = {
+    { "Seafile",     "Self-hosted file sync & share",        2, 2048, 40, 80,   "/api2/ping/" },
+    { "CryptPad",    "Encrypted collaborative docs",         2, 2048, 20, 3000, "/" },
+    { "Forgejo",     "Lightweight Git forge",                2, 2048, 30, 3000, "/" },
+    { "VaultWarden", "Bitwarden-compatible password vault",  1, 1024, 10, 80,   "/alive" },
+    { "Readeck",     "Read-it-later / bookmarks",            1, 1024, 10, 8000, "/" },
+    { "Jellyfin",    "Media server",                         2, 4096, 30, 8096, "/web/" },
+    { "RoundCube",   "Webmail (with smtp2go relay)",         1, 1024, 10, 80,   "/" },
+    { "DokuWiki",    "Flat-file wiki",                       1, 1024, 10, 80,   "/" },
+    { "Wekan",       "Kanban boards",                        2, 2048, 20, 80,   "/" },
+}
+for _, a in ipairs(APP_CATALOG) do
+    conn:query(
+        "INSERT OR IGNORE INTO app_templates " ..
+        "(name, description, default_cpus, default_ram_mb, default_disk_gb, " ..
+        "monitor_type, monitor_port, monitor_path, monitor_expected) " ..
+        "VALUES (?, ?, ?, ?, ?, 'http', ?, ?, 200)",
+        a[1], a[2], a[3], a[4], a[5], a[6], a[7])
+end
+
 -- New tables (idempotent via IF NOT EXISTS)
 conn:exec([[
     CREATE TABLE IF NOT EXISTS ssh_keys (

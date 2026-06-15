@@ -120,6 +120,25 @@ function _M.set_ntp(server)
     return run({ "ntp", server or "off" })
 end
 
+-- VMs (QEMU/NVMM). Paths are validated server-side and contain no
+-- spaces, so the unquoted run() join is safe.
+function _M.vm_create(name, gb, volume)
+    return run({ "vmcreate", name, tostring(gb), volume or "-" })
+end
+
+function _M.vm_start(name, cpus, ram_mb, image, tap, mac, iso)
+    return run({ "vmstart", name, tostring(cpus), tostring(ram_mb),
+        image, tap, mac or "-", iso or "-" })
+end
+
+function _M.vm_stop(name, tap)
+    return run({ "vmstop", name, tap })
+end
+
+function _M.vm_delete(name, volume)
+    return run({ "vmdelete", name, volume or "-" })
+end
+
 function _M.write_ssh_keys(username, keys_text)
     return run_with_stdin({ "sshkeys", username, "write" }, keys_text)
 end

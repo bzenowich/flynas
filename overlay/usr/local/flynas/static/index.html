@@ -290,6 +290,9 @@
     const STOR_POOL_BASE = 49152;
     const NET_POOL_BASE = 65536;
     const BAK_POOL_BASE = 81920;
+    const MON_POOL_BASE = 98304;
+    const VM_POOL_BASE = 114688;
+    const APP_POOL_BASE = 131072;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -460,6 +463,12 @@
                 handleNetworkKey(event);
             } else if (page === PAGE_BACKUP) {
                 handleBackupKey(event);
+            } else if (page === PAGE_MONITORING) {
+                handleMonitoringKey(event);
+            } else if (page === PAGE_VMS) {
+                handleVmsKey(event);
+            } else if (page === PAGE_APPS) {
+                handleAppsKey(event);
             }
             return;
         }
@@ -610,6 +619,18 @@
 
     function handlePageAction(packed) {
         const action = packed & 63, arg = packed >> 6;
+        if (action >= 42) {
+            handleAppAction(action, arg);
+            return;
+        }
+        if (action >= 36) {
+            handleVmAction(action, arg);
+            return;
+        }
+        if (action >= 27) {
+            handleMonitorAction(action, arg);
+            return;
+        }
         if (action >= 19) {
             handleBackupAction(action, arg);
             return;
@@ -1210,6 +1231,456 @@
         event.preventDefault();
     }
 
+    // ----------------------------------------------------------------
+    // Monitoring page: monitor list (status/uptime/pause/delete + add
+    // form), notification channels (add/delete), and per-monitor
+    // channel assignment via an expandable checkbox list.
+    // ----------------------------------------------------------------
+    const PAGE_MONITORING = 1;
+    const PACT_MON_ADD = 27, PACT_MON_DELETE = 28, PACT_MON_PAUSE = 29,
+          PACT_MON_TYPE = 30, PACT_MON_SELECT = 31, PACT_CHAN_TOGGLE = 32,
+          PACT_CHAN_ADD = 33, PACT_CHAN_DELETE = 34, PACT_CHAN_TYPE = 35;
+    const MON_TYPES = ['http', 'tcp', 'ping', 'dns', 'keyword'];
+    const CHAN_TYPES = ['webhook', 'email'];
+
+    let monMonitors = [], monChannels = [];
+    let monSelected = 0;            // expanded monitor id
+    let monAssigned = new Set();    // channel ids assigned to selected monitor
+    let monSummary = { total: 0, up: 0, down: 0, paused: 0, uptime_24h: null };
+    // focus indices 13..17 (see MonitorsCard/ChannelsCard in main.c)
+    let monInputs = { name: '', target: '', interval: '' };
+    let monAddType = 'http';
+    let chanInputs = { name: '', detail: '' };
+    let chanAddType = 'webhook';
+    let monError = '', monInfo = '';
+    let monTimer = null;
+
+    function chanDetail(c) {
+        try {
+            const cfg = JSON.parse(c.config || '{}');
+            return cfg.to || cfg.url || '';
+        } catch (e) { return ''; }
+    }
+
+    function syncMonitoring() {
+        let off = MON_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 160));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearMonitors();
+        for (const m of monMonitors) {
+            const name = write(m.name);
+            const type = write(m.type);
+            const target = write(m.type + '  ' + m.target);
+            const status = write(m.status || 'pending');
+            const up = m.uptime_24h == null ? '—' : m.uptime_24h.toFixed(0) + '%';
+            const rt = m.last_response_ms == null ? '' : '  ' + m.last_response_ms + ' ms';
+            const detail = write(up + rt);
+            instance.exports.AddMonitor(m.id, name.off, name.len, type.off, type.len,
+                target.off, target.len, status.off, status.len,
+                detail.off, detail.len, m.enabled ? 1 : 0);
+        }
+        instance.exports.ClearChannels();
+        for (const c of monChannels) {
+            const name = write(c.name);
+            const type = write(c.type);
+            const detail = write(chanDetail(c));
+            instance.exports.AddChannel(c.id, name.off, name.len, type.off, type.len,
+                detail.off, detail.len, monAssigned.has(c.id) ? 1 : 0);
+        }
+        const s = monSummary;
+        const line = write(s.total + ' monitors  ·  24h uptime '
+            + (s.uptime_24h == null ? '—' : s.uptime_24h.toFixed(1) + '%'));
+        instance.exports.SetMonSummary(s.up, s.down, s.paused, line.off, line.len, monSelected);
+        const inN = write(monInputs.name), inT = write(monInputs.target),
+              inI = write(monInputs.interval), mt = write(monAddType),
+              cn = write(chanInputs.name), cd = write(chanInputs.detail),
+              ct = write(chanAddType);
+        instance.exports.SetMonInputs(inN.off, inN.len, inT.off, inT.len,
+            inI.off, inI.len, mt.off, mt.len, cn.off, cn.len, cd.off, cd.len,
+            ct.off, ct.len);
+        const err = write(monError), info = write(monInfo);
+        instance.exports.SetMonMsg(err.off, err.len, info.off, info.len);
+    }
+
+    async function loadMonitoring() {
+        try {
+            const [mons, chans, summary] = await Promise.all([
+                getJSON('/api/monitors'), getJSON('/api/notifications'),
+                getJSON('/api/monitors/summary')]);
+            monMonitors = Array.isArray(mons.monitors) ? mons.monitors : [];
+            monChannels = Array.isArray(chans.channels) ? chans.channels : [];
+            monSummary = summary || monSummary;
+            if (monSelected && !monMonitors.some(m => m.id === monSelected)) {
+                monSelected = 0;
+                monAssigned = new Set();
+            } else if (monSelected) {
+                const detail = await getJSON('/api/monitors/' + monSelected);
+                monAssigned = new Set(Array.isArray(detail.channel_ids) ? detail.channel_ids : []);
+            }
+        } catch (err) {
+            monError = 'load failed: ' + err;
+        }
+        syncMonitoring();
+        watchMonitoring();
+    }
+
+    // Live-refresh the list while the page is open (checks run server-side)
+    function watchMonitoring() {
+        if (monTimer) return;
+        monTimer = setInterval(() => {
+            if (instance.exports.GetActivePage() !== PAGE_MONITORING) {
+                clearInterval(monTimer); monTimer = null; return;
+            }
+            // Don't rebuild the page mid-typing (would drop clicks/keys)
+            // — pause while a field is focused or a form has content.
+            if (accFocus >= 13 && accFocus <= 17) return;
+            if (monInputs.name || monInputs.target || monInputs.interval ||
+                chanInputs.name || chanInputs.detail) return;
+            loadMonitoring();
+        }, 5000);
+    }
+
+    async function monitoringMutate(promise, okMsg) {
+        monError = ''; monInfo = '';
+        try {
+            const { ok, data } = await promise;
+            if (!ok) monError = data.error || 'request failed';
+            else if (okMsg) monInfo = okMsg;
+        } catch (e) {
+            monError = 'network error';
+        }
+        await loadMonitoring();
+    }
+
+    async function selectMonitor(mid) {
+        if (monSelected === mid) {
+            monSelected = 0;
+            monAssigned = new Set();
+            syncMonitoring();
+            return;
+        }
+        try {
+            const detail = await getJSON('/api/monitors/' + mid);
+            monAssigned = new Set(Array.isArray(detail.channel_ids) ? detail.channel_ids : []);
+            monSelected = mid;
+        } catch (err) {
+            monError = 'monitor load failed: ' + err;
+        }
+        syncMonitoring();
+    }
+
+    function handleMonitorAction(action, arg) {
+        switch (action) {
+            case PACT_MON_ADD: {
+                if (!monInputs.name || !monInputs.target) {
+                    monError = 'name and target are required';
+                    syncMonitoring();
+                    break;
+                }
+                const body = { name: monInputs.name, type: monAddType,
+                    target: monInputs.target };
+                const iv = parseInt(monInputs.interval, 10);
+                if (iv) body.interval_sec = iv;
+                monInputs = { name: '', target: '', interval: '' };
+                monitoringMutate(postJSON('/api/monitors', body), 'Monitor added');
+                break;
+            }
+            case PACT_MON_DELETE:
+                if (monSelected === arg) { monSelected = 0; monAssigned = new Set(); }
+                monitoringMutate(sendJSON('DELETE', '/api/monitors/' + arg));
+                break;
+            case PACT_MON_PAUSE: {
+                const m = monMonitors.find(x => x.id === arg);
+                if (m) monitoringMutate(postJSON('/api/monitors/' + arg
+                    + (m.enabled ? '/pause' : '/resume')));
+                break;
+            }
+            case PACT_MON_TYPE:
+                monAddType = MON_TYPES[(MON_TYPES.indexOf(monAddType) + 1) % MON_TYPES.length];
+                syncMonitoring();
+                break;
+            case PACT_MON_SELECT:
+                selectMonitor(arg);
+                break;
+            case PACT_CHAN_TOGGLE: {
+                if (!monSelected) break;
+                if (monAssigned.has(arg)) monAssigned.delete(arg);
+                else monAssigned.add(arg);
+                syncMonitoring();
+                monitoringMutate(sendJSON('PUT', '/api/monitors/' + monSelected + '/notifications',
+                    { channel_ids: [...monAssigned] }));
+                break;
+            }
+            case PACT_CHAN_TYPE:
+                chanAddType = CHAN_TYPES[(CHAN_TYPES.indexOf(chanAddType) + 1) % CHAN_TYPES.length];
+                syncMonitoring();
+                break;
+            case PACT_CHAN_ADD: {
+                if (!chanInputs.name || !chanInputs.detail) {
+                    monError = 'channel name and target are required';
+                    syncMonitoring();
+                    break;
+                }
+                const body = { name: chanInputs.name, type: chanAddType };
+                if (chanAddType === 'email') body.to = chanInputs.detail;
+                else body.url = chanInputs.detail;
+                chanInputs = { name: '', detail: '' };
+                monitoringMutate(postJSON('/api/notifications', body), 'Channel added');
+                break;
+            }
+            case PACT_CHAN_DELETE:
+                monitoringMutate(sendJSON('DELETE', '/api/notifications/' + arg));
+                break;
+        }
+    }
+
+    function handleMonitoringKey(event) {
+        if (accFocus < 13 || accFocus > 17) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const map = { 13: ['mon', 'name'], 14: ['mon', 'target'], 15: ['mon', 'interval'],
+                      16: ['chan', 'name'], 17: ['chan', 'detail'] };
+        const [grp, key] = map[accFocus];
+        const obj = grp === 'mon' ? monInputs : chanInputs;
+        if (event.key === 'Enter') {
+            handleMonitorAction(grp === 'mon' ? PACT_MON_ADD : PACT_CHAN_ADD, 0);
+        } else if (event.key === 'Backspace') {
+            obj[key] = obj[key].slice(0, -1);
+            syncMonitoring();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && obj[key].length < 128) {
+            obj[key] += event.key;
+            syncMonitoring();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
+    // ----------------------------------------------------------------
+    // VMs page: list with live status, lifecycle buttons, create form.
+    // Status comes from QMP server-side, so the page live-refreshes.
+    // ----------------------------------------------------------------
+    const PAGE_VMS = 6;
+    const PACT_VM_CREATE = 36, PACT_VM_DELETE = 37, PACT_VM_START = 38,
+          PACT_VM_STOP = 39, PACT_VM_SUSPEND = 40, PACT_VM_RESUME = 41;
+
+    let vmList = [];
+    // focus indices 18..21 (see VmsCard in main.c)
+    let vmInputs = { name: '', cpus: '', ram: '', disk: '' };
+    let vmError = '', vmInfo = '';
+    let vmTimer = null;
+
+    function syncVms() {
+        let off = VM_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 128));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearVms();
+        for (const v of vmList) {
+            const name = write(v.name);
+            const spec = write(v.cpus + ' vCPU · ' + v.ram_mb + ' MB · ' + v.disk_gb + ' GB');
+            const status = write(v.status || 'stopped');
+            instance.exports.AddVm(v.id, name.off, name.len, spec.off, spec.len,
+                status.off, status.len);
+        }
+        const n = write(vmInputs.name), c = write(vmInputs.cpus),
+              r = write(vmInputs.ram), d = write(vmInputs.disk);
+        instance.exports.SetVmInputs(n.off, n.len, c.off, c.len, r.off, r.len, d.off, d.len);
+        const err = write(vmError), info = write(vmInfo);
+        instance.exports.SetVmMsg(err.off, err.len, info.off, info.len);
+    }
+
+    async function loadVms() {
+        try {
+            const data = await getJSON('/api/vms');
+            vmList = Array.isArray(data.vms) ? data.vms : [];
+        } catch (err) {
+            vmError = 'load failed: ' + err;
+        }
+        syncVms();
+        watchVms();
+    }
+
+    function watchVms() {
+        if (vmTimer) return;
+        vmTimer = setInterval(() => {
+            if (instance.exports.GetActivePage() !== PAGE_VMS) {
+                clearInterval(vmTimer); vmTimer = null; return;
+            }
+            // Don't rebuild the page mid-typing (would drop clicks/keys)
+            // — pause while a field is focused or the form has content.
+            if (accFocus >= 18 && accFocus <= 21) return;
+            if (vmInputs.name || vmInputs.cpus || vmInputs.ram || vmInputs.disk) return;
+            loadVms();
+        }, 5000);
+    }
+
+    async function vmsMutate(promise, okMsg) {
+        vmError = ''; vmInfo = '';
+        try {
+            const { ok, data } = await promise;
+            if (!ok) vmError = data.error || 'request failed';
+            else if (okMsg) vmInfo = okMsg;
+        } catch (e) {
+            vmError = 'network error';
+        }
+        await loadVms();
+    }
+
+    function handleVmAction(action, arg) {
+        switch (action) {
+            case PACT_VM_CREATE: {
+                if (!vmInputs.name) {
+                    vmError = 'name is required'; syncVms(); break;
+                }
+                const body = { name: vmInputs.name };
+                if (vmInputs.cpus) body.cpus = parseInt(vmInputs.cpus, 10);
+                if (vmInputs.ram) body.ram_mb = parseInt(vmInputs.ram, 10);
+                if (vmInputs.disk) body.disk_gb = parseInt(vmInputs.disk, 10);
+                vmInputs = { name: '', cpus: '', ram: '', disk: '' };
+                vmsMutate(postJSON('/api/vms', body), 'VM created');
+                break;
+            }
+            case PACT_VM_DELETE:
+                vmsMutate(sendJSON('DELETE', '/api/vms/' + arg));
+                break;
+            case PACT_VM_START:
+                vmsMutate(postJSON('/api/vms/' + arg + '/start'), 'Starting…');
+                break;
+            case PACT_VM_STOP:
+                vmsMutate(postJSON('/api/vms/' + arg + '/stop'), 'Stopping…');
+                break;
+            case PACT_VM_SUSPEND:
+                vmsMutate(postJSON('/api/vms/' + arg + '/suspend'));
+                break;
+            case PACT_VM_RESUME:
+                vmsMutate(postJSON('/api/vms/' + arg + '/resume'));
+                break;
+        }
+    }
+
+    function handleVmsKey(event) {
+        if (accFocus < 18 || accFocus > 21) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const key = ['name', 'cpus', 'ram', 'disk'][accFocus - 18];
+        if (event.key === 'Enter') {
+            handleVmAction(PACT_VM_CREATE, 0);
+        } else if (event.key === 'Backspace') {
+            vmInputs[key] = vmInputs[key].slice(0, -1);
+            syncVms();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && vmInputs[key].length < 32) {
+            vmInputs[key] += event.key;
+            syncVms();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
+    // ----------------------------------------------------------------
+    // Apps page: install catalog. One name/IP pair is shared by all
+    // cards; Install creates a VM from the template (see api/apps.lua).
+    // ----------------------------------------------------------------
+    const PAGE_APPS = 7;
+    const PACT_APP_INSTALL = 42;
+
+    let appList = [];
+    let appInputs = { name: '', ip: '' };   // focus 22, 23
+    let appError = '', appInfo = '';
+
+    function syncApps() {
+        let off = APP_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 160));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearApps();
+        for (const a of appList) {
+            const name = write(a.name);
+            const desc = write(a.description || '');
+            const spec = write(a.default_cpus + ' vCPU · ' + a.default_ram_mb
+                + ' MB · ' + a.default_disk_gb + ' GB');
+            instance.exports.AddApp(a.id, name.off, name.len, desc.off, desc.len,
+                spec.off, spec.len);
+        }
+        const n = write(appInputs.name), ip = write(appInputs.ip);
+        instance.exports.SetAppInputs(n.off, n.len, ip.off, ip.len);
+        const err = write(appError), info = write(appInfo);
+        instance.exports.SetAppMsg(err.off, err.len, info.off, info.len);
+    }
+
+    async function loadApps() {
+        try {
+            const data = await getJSON('/api/apps');
+            appList = Array.isArray(data.apps) ? data.apps : [];
+        } catch (err) {
+            appError = 'load failed: ' + err;
+        }
+        syncApps();
+    }
+
+    function handleAppAction(action, arg) {
+        if (action !== PACT_APP_INSTALL) return;
+        if (!appInputs.name) {
+            appError = 'enter a VM name to install as';
+            appInfo = '';
+            syncApps();
+            return;
+        }
+        const body = { name: appInputs.name };
+        if (appInputs.ip) body.ip_address = appInputs.ip;
+        const app = appList.find(a => a.id === arg);
+        appInputs = { name: '', ip: '' };
+        appError = ''; appInfo = '';
+        (async () => {
+            try {
+                const { ok, data } = await postJSON('/api/apps/' + arg + '/install', body);
+                if (!ok) appError = data.error || 'install failed';
+                else appInfo = (app ? app.name : 'App') + ' installed as VM "'
+                    + (data.name || '') + '" — start it on the VMs page';
+            } catch (e) {
+                appError = 'network error';
+            }
+            syncApps();
+        })();
+    }
+
+    function handleAppsKey(event) {
+        if (accFocus < 22 || accFocus > 23) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const key = ['name', 'ip'][accFocus - 22];
+        if (event.key === 'Backspace') {
+            appInputs[key] = appInputs[key].slice(0, -1);
+            syncApps();
+        } else if (event.key === 'Escape') {
+            accFocus = -1;
+            instance.exports.SetAccountsFocus(-1);
+        } else if (event.key.length === 1 && appInputs[key].length < 40) {
+            appInputs[key] += event.key;
+            syncApps();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    }
+
     let prevCpuTicks = null;
 
     async function refreshDashboard() {
@@ -1643,6 +2114,9 @@
                 else if (page === PAGE_STORAGE) loadStorage();
                 else if (page === PAGE_NETWORK) loadNetwork();
                 else if (page === PAGE_BACKUP) loadBackup();
+                else if (page === PAGE_MONITORING) loadMonitoring();
+                else if (page === PAGE_VMS) loadVms();
+                else if (page === PAGE_APPS) loadApps();
             }
             const pageAction = instance.exports.TakePageAction();
             if (pageAction) handlePageAction(pageAction);

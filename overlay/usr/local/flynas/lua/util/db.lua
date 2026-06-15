@@ -92,8 +92,12 @@ function _M:exec(sql)
     return true
 end
 
-local function bind_params(stmt, params)
-    for i, v in ipairs(params) do
+-- Bind by explicit count, not ipairs: a nil in the middle of the
+-- params (e.g. an optional column) must bind NULL, not truncate every
+-- later parameter (ipairs/# stop at the first nil hole).
+local function bind_params(stmt, params, n)
+    for i = 1, n do
+        local v = params[i]
         local t = type(v)
         if t == "string" then
             lib.sqlite3_bind_text(stmt, i, v, #v, SQLITE_TRANSIENT)
@@ -103,7 +107,7 @@ local function bind_params(stmt, params)
             else
                 lib.sqlite3_bind_double(stmt, i, v)
             end
-        elseif v == nil then
+        else
             lib.sqlite3_bind_null(stmt, i)
         end
     end
@@ -116,9 +120,11 @@ function _M:query(sql, ...)
         return nil, ffi.string(lib.sqlite3_errmsg(self._db))
     end
 
-    local params = { ... }
-    if #params > 0 then
-        bind_params(stmt[0], params)
+    -- select('#') gives the true arg count including nil holes, which
+    -- {...} length (#) would truncate at the first nil.
+    local n = select("#", ...)
+    if n > 0 then
+        bind_params(stmt[0], { ... }, n)
     end
 
     local rows = {}

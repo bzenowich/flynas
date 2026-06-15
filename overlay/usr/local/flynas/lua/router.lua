@@ -8,6 +8,9 @@ local dashboard_api = require("api.dashboard")
 local storage_api = require("api.storage")
 local network_api = require("api.network")
 local backup_api = require("api.backup")
+local monitors_api = require("api.monitors")
+local vms_api = require("api.vms")
+local apps_api = require("api.apps")
 
 local uri = ngx.var.uri
 local method = ngx.req.get_method()
@@ -207,6 +210,41 @@ local routes = {
     ["POST:settings/smtp/test"] = function()
         settings_api.test_smtp(read_body())
     end,
+
+    -- Monitoring
+    ["GET:monitors"] = function()
+        monitors_api.list()
+    end,
+
+    ["POST:monitors"] = function()
+        monitors_api.create(read_body())
+    end,
+
+    ["GET:monitors/summary"] = function()
+        monitors_api.summary()
+    end,
+
+    ["GET:notifications"] = function()
+        monitors_api.list_channels()
+    end,
+
+    ["POST:notifications"] = function()
+        monitors_api.create_channel(read_body())
+    end,
+
+    -- VMs
+    ["GET:vms"] = function()
+        vms_api.list()
+    end,
+
+    ["POST:vms"] = function()
+        vms_api.create(read_body())
+    end,
+
+    -- Apps
+    ["GET:apps"] = function()
+        apps_api.list()
+    end,
 }
 
 -- Pattern-based routes (checked if no exact match)
@@ -235,6 +273,22 @@ local pattern_routes = {
     { "PUT",    "^groups/(%d+)$",                function(id) groups_api.update(tonumber(id), read_body()) end },
     { "DELETE", "^groups/(%d+)$",                function(id) groups_api.delete(tonumber(id)) end },
     { "PUT",    "^groups/(%d+)/members$",        function(id) groups_api.set_members(tonumber(id), read_body()) end },
+    { "GET",    "^monitors/(%d+)$",              function(id) monitors_api.get(tonumber(id)) end },
+    { "PUT",    "^monitors/(%d+)$",              function(id) monitors_api.update(tonumber(id), read_body()) end },
+    { "DELETE", "^monitors/(%d+)$",              function(id) monitors_api.delete(tonumber(id)) end },
+    { "POST",   "^monitors/(%d+)/pause$",        function(id) monitors_api.pause(tonumber(id)) end },
+    { "POST",   "^monitors/(%d+)/resume$",       function(id) monitors_api.resume(tonumber(id)) end },
+    { "GET",    "^monitors/(%d+)/history$",      function(id) monitors_api.history(tonumber(id)) end },
+    { "PUT",    "^monitors/(%d+)/notifications$", function(id) monitors_api.set_notifications(tonumber(id), read_body()) end },
+    { "PUT",    "^notifications/(%d+)$",         function(id) monitors_api.update_channel(tonumber(id), read_body()) end },
+    { "DELETE", "^notifications/(%d+)$",         function(id) monitors_api.delete_channel(tonumber(id)) end },
+    { "GET",    "^vms/(%d+)$",                   function(id) vms_api.get(tonumber(id)) end },
+    { "DELETE", "^vms/(%d+)$",                   function(id) vms_api.delete(tonumber(id)) end },
+    { "POST",   "^vms/(%d+)/start$",             function(id) vms_api.start(tonumber(id)) end },
+    { "POST",   "^vms/(%d+)/stop$",              function(id) vms_api.stop(tonumber(id)) end },
+    { "POST",   "^vms/(%d+)/suspend$",           function(id) vms_api.suspend(tonumber(id)) end },
+    { "POST",   "^vms/(%d+)/resume$",            function(id) vms_api.resume(tonumber(id)) end },
+    { "POST",   "^apps/(%d+)/install$",          function(id) apps_api.install(tonumber(id), read_body()) end },
 }
 
 local key = method .. ":" .. path
