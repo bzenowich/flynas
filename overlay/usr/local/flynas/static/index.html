@@ -497,6 +497,19 @@
         event.preventDefault();
     }
 
+    function handleAuthPaste(event) {
+        if (authScreen === SCREEN_MAIN || authScreen === SCREEN_LOADING) return;
+        const text = (event.clipboardData || window.clipboardData).getData('text');
+        if (!text) return;
+        // TOTP/one-time codes are pasted with stray spaces/newlines; strip them.
+        const clean = text.replace(/\s+/g, '');
+        if (clean) {
+            authInputText = (authInputText + clean).slice(0, 64);
+            syncAuth();
+        }
+        event.preventDefault();
+    }
+
     async function startApp() {
         try {
             const sess = await fetch('/api/session', { credentials: 'same-origin' });
@@ -1348,6 +1361,7 @@
                 clearInterval(monTimer); monTimer = null; return;
             }
             // Pause refresh right after an interaction (see watchVms).
+            if (window.__flynasPauseRefresh) return;
             if (recentlyInteracted()) return;
             if (accFocus >= 13 && accFocus <= 17) return;
             if (monInputs.name || monInputs.target || monInputs.interval ||
@@ -1575,6 +1589,7 @@
             }
             // Don't rebuild the page right after an interaction — a
             // full rebuild can drop an in-flight click/keystroke.
+            if (window.__flynasPauseRefresh) return;
             if (recentlyInteracted()) return;
             if (accFocus >= 18 && accFocus <= 21) return;
             if (vmInputs.name || vmInputs.cpus || vmInputs.ram || vmInputs.disk) return;
@@ -2004,6 +2019,7 @@
         renderCommandSize = getStructTotalSize(renderCommandDefinition);
         stringPoolBase = instance.exports.GetStringPool();
         document.addEventListener("keydown", handleAuthKey);
+        document.addEventListener("paste", handleAuthPaste);
         startApp();
         renderLoop();
     }

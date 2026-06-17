@@ -497,6 +497,19 @@
         event.preventDefault();
     }
 
+    function handleAuthPaste(event) {
+        if (authScreen === SCREEN_MAIN || authScreen === SCREEN_LOADING) return;
+        const text = (event.clipboardData || window.clipboardData).getData('text');
+        if (!text) return;
+        // TOTP/one-time codes are pasted with stray spaces/newlines; strip them.
+        const clean = text.replace(/\s+/g, '');
+        if (clean) {
+            authInputText = (authInputText + clean).slice(0, 64);
+            syncAuth();
+        }
+        event.preventDefault();
+    }
+
     async function startApp() {
         try {
             const sess = await fetch('/api/session', { credentials: 'same-origin' });
@@ -2006,6 +2019,7 @@
         renderCommandSize = getStructTotalSize(renderCommandDefinition);
         stringPoolBase = instance.exports.GetStringPool();
         document.addEventListener("keydown", handleAuthKey);
+        document.addEventListener("paste", handleAuthPaste);
         startApp();
         renderLoop();
     }
