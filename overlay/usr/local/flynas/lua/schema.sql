@@ -153,3 +153,33 @@ CREATE TABLE IF NOT EXISTS app_templates (
     default_disk_gb INTEGER,
     post_install_script TEXT
 );
+
+-- OIDC provider: SQLite stays the user directory; these expose it to apps.
+CREATE TABLE IF NOT EXISTS oidc_clients (
+    id INTEGER PRIMARY KEY,
+    vm_id INTEGER REFERENCES vms(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    client_id TEXT UNIQUE NOT NULL,
+    client_secret_hash TEXT NOT NULL,
+    redirect_uris TEXT NOT NULL,            -- newline-separated allowlist
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS app_grants (
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    client_id INTEGER REFERENCES oidc_clients(id) ON DELETE CASCADE,
+    role TEXT DEFAULT 'user',               -- user|admin → groups claim
+    PRIMARY KEY (user_id, client_id)
+);
+
+CREATE TABLE IF NOT EXISTS oidc_codes (
+    code TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    redirect_uri TEXT NOT NULL,
+    nonce TEXT,
+    scope TEXT,
+    code_challenge TEXT,
+    code_challenge_method TEXT,
+    expires_at INTEGER NOT NULL             -- unix seconds; 60s TTL
+);

@@ -11,6 +11,7 @@ local backup_api = require("api.backup")
 local monitors_api = require("api.monitors")
 local vms_api = require("api.vms")
 local apps_api = require("api.apps")
+local oidc_api = require("api.oidc")
 
 local uri = ngx.var.uri
 local method = ngx.req.get_method()
@@ -44,6 +45,13 @@ local public_routes = {
     ["POST:setup/confirm"] = true,
     ["POST:login"] = true,
     ["POST:login/verify"] = true,
+    -- OIDC provider endpoints (apps reach these directly; each does its
+    -- own auth — client_secret/PKCE, Bearer token, or session-redirect).
+    ["GET:oidc/.well-known/openid-configuration"] = true,
+    ["GET:oidc/jwks"] = true,
+    ["GET:oidc/authorize"] = true,
+    ["POST:oidc/token"] = true,
+    ["GET:oidc/userinfo"] = true,
 }
 
 -- Exact-match route dispatch table
@@ -253,6 +261,36 @@ local routes = {
     ["GET:apps"] = function()
         apps_api.list()
     end,
+
+    -- OIDC provider (SSO over the SQLite directory)
+    ["GET:oidc/.well-known/openid-configuration"] = function()
+        oidc_api.discovery()
+    end,
+
+    ["GET:oidc/jwks"] = function()
+        oidc_api.jwks()
+    end,
+
+    ["GET:oidc/authorize"] = function()
+        oidc_api.authorize()
+    end,
+
+    ["POST:oidc/token"] = function()
+        oidc_api.token()
+    end,
+
+    ["GET:oidc/userinfo"] = function()
+        oidc_api.userinfo()
+    end,
+
+    -- OIDC client registration (admin session required)
+    ["GET:oidc/clients"] = function()
+        oidc_api.list_clients()
+    end,
+
+    ["POST:oidc/clients"] = function()
+        oidc_api.create_client(read_body())
+    end,
 }
 
 -- Pattern-based routes (checked if no exact match)
@@ -301,6 +339,7 @@ local pattern_routes = {
     { "POST",   "^vms/(%d+)/forwards$",          function(id) vms_api.add_forward(tonumber(id), read_body()) end },
     { "DELETE", "^forwards/(%d+)$",              function(id) vms_api.delete_forward(tonumber(id)) end },
     { "POST",   "^apps/(%d+)/install$",          function(id) apps_api.install(tonumber(id), read_body()) end },
+    { "DELETE", "^oidc/clients/(%d+)$",          function(id) oidc_api.delete_client(tonumber(id)) end },
 }
 
 local key = method .. ":" .. path

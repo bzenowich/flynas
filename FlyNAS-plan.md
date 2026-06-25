@@ -593,6 +593,107 @@ later bind (mac/app_template were being dropped). Now uses `select('#',...)`
 
 ---
 
+### 2.10 Identity / SSO API — IN PROGRESS (OIDC provider over the SQLite directory)
+
+**Decision (2026-06-24):** Installable VM apps need a shared user
+directory. We do **not** stand up OpenLDAP or Kerberos. The existing
+`users`/`groups`/`user_groups` tables in SQLite stay the single source of
+truth; FlyNAS exposes them to apps as an **OpenID Connect provider**
+running inside the existing OpenResty (host-side), not a separate IdP VM.
+
+**Why OIDC, not LDAP/Kerberos:**
+- Our auth is **passwordless** (session + TOTP + SSH keys) — there is no
+  password in the DB. LDAP simple-bind *needs* a password, so LDAP would
+  force re-introducing the exact credential we deleted. OIDC lets FlyNAS
+  run the login ceremony its own way (TOTP) and hand the app a signed
+  token — a perfect fit for passwordless.
+- Kerberos wants nobody in the catalog (web apps don't use ticket SSO) and
+  brings realm/keytab/time-sync fragility. Killed outright.
+- The priority apps (Seafile, Forgejo, Jellyfin, VaultWarden, CryptPad)
+  all speak OIDC; VaultWarden + CryptPad are OIDC-*only*. One protocol
+  covers all five.
+
+**Source of truth stays SQLite — extend, don't refactor.** New tables:
+
+```sql
+CREATE TABLE oidc_clients (        -- one per installed app
+  id INTEGER PRIMARY KEY,
+  vm_id INTEGER REFERENCES vms(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  client_id TEXT UNIQUE NOT NULL,
+  client_secret_hash TEXT NOT NULL,   -- argon2, reuse util/argon2
+  redirect_uris TEXT NOT NULL,        -- newline-separated allowlist
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE app_grants (          -- who may access which app + role
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  client_id INTEGER REFERENCES oidc_clients(id) ON DELETE CASCADE,
+  role TEXT DEFAULT 'user',           -- user|admin → groups claim
+  PRIMARY KEY (user_id, client_id)
+);
+CREATE TABLE oidc_codes (          -- short-lived auth codes + PKCE
+  code TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  redirect_uri TEXT NOT NULL,
+  nonce TEXT, scope TEXT,
+  code_challenge TEXT, code_challenge_method TEXT,
+  expires_at INTEGER NOT NULL         -- unix seconds; 60s TTL
+);
+```
+
+**Endpoints (all under `/api/oidc/*`; issuer = `https://<host>/api/oidc`):**
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/oidc/.well-known/openid-configuration` | public | Discovery document |
+| `GET /api/oidc/jwks` | public | Public signing key (RS256, as JWK) |
+| `GET /api/oidc/authorize` | **our session** | Authorization-code start; reuses the `flynas_session` cookie — no new login UX. No session → 302 to the SPA login with a `return` param |
+| `POST /api/oidc/token` | client_secret + PKCE | code → `id_token` + `access_token` (form-encoded, not JSON) |
+| `GET /api/oidc/userinfo` | Bearer access_token | `sub`/`email`/`name`/`groups` |
+| `GET/POST/DELETE /api/oidc/clients[/:id]` | admin session | Client registration (manual + install-time) |
+
+**Signing:** RS256. Keypair generated once at first use
+(`/usr/local/flynas/oidc_key.pem`, `0600`), published via JWKS. JWT
+sign/verify shells out to base `openssl` (no privilege needed, so it runs
+directly via `io.popen` like `util/exec.run_shell`, *not* through the
+setuid helper). PKCE S256 supported (`resty.sha256`).
+
+**Claims:** `groups` is emitted from `user_groups` plus the per-app
+`app_grants.role`, so apps map admin vs. user from a single directory.
+
+**Install integration (the payoff, deferred with guest provisioning):**
+catalog install will auto-mint an `oidc_client` (client_id/secret +
+redirect URI) and the per-app `post_install_script` will write the app's
+OIDC config pointing at the issuer — so installing Seafile yields working
+SSO with no manual setup. This rides on §2.9 guest provisioning, still
+deferred behind the VM LAN bridge.
+
+**Per-app caveats to document, not oversell:**
+- VaultWarden — OIDC is *login only*; the vault stays end-to-end
+  encrypted behind the user's master password.
+- Jellyfin — needs the SSO plugin baked into the guest image.
+- RoundCube — authenticates against IMAP, not the directory; out of scope.
+
+**Status — VERIFIED on h2dev (2026-06-24):** schema + migrations,
+`util/jwt.lua` (b64url + RS256 sign/verify + SHA-256, all over `openssl`),
+`util/oidc_keys.lua` (lazy keygen + JWK export), `api/oidc.lua` (discovery,
+jwks, authorize, token, userinfo, client CRUD), and router wiring landed.
+Full authorization-code + PKCE flow exercised end-to-end: client mint →
+authorize (session-cookie reuse) → 302 with code → token (RS256 id_token +
+access_token) → userinfo. id_token claims correct (`sub`/`name`/
+`preferred_username`/`nonce`/`groups:["admin"]`); `email` correctly omitted
+when the user has none. Negatives all reject: code replay → `invalid_grant`,
+wrong PKCE verifier → `invalid_grant/pkce`, no/garbage bearer → `invalid_token`.
+**Gotcha:** this OpenResty has no `resty.sha256` (same gap as `resty.http`,
+§2.8) — PKCE S256 hashing moved to `openssl dgst` in `util/jwt.sha256_b64url`.
+The http-context error log is `/var/log/flynas/error.log`, *not*
+`logs/error.log` (that's only the master log). Open items: SPA login
+`return`-param handoff for the 302 path, and the apps.lua auto-client-mint
+(waits on §2.9 guest provisioning).
+
+---
+
 ## Phase 3: Frontend (Clay UI)
 
 ### 3.1 Build Setup — DONE
