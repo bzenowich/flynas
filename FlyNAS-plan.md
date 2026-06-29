@@ -712,8 +712,25 @@ role toggle), wired to `GET/PUT …/clients/:id/grants`. New Clay exports
 (ClearClients/AddClient/SetSelectedClient/ClearGrants/AddGrant/SetSsoMsg) +
 JS glue; string pool grown 144K→160K for the new SSO pool region. Verified
 on h2dev with `tools/uitest/test-sso-ui.mjs` (grant→DB role=user, toggle→admin,
-revoke→empty, all checked against the DB). Open item: the apps.lua
-auto-client-mint (waits on §2.9 guest provisioning).
+revoke→empty, all checked against the DB).
+
+**Auto-client-mint at install — SCAFFOLDED (2026-06-29; guest delivery still
+deferred).** `app_templates` gained `oidc_redirect_path` (NULL ⇒ app isn't
+SSO; seeded for Seafile `/oauth/callback` and Forgejo
+`/user/oauth2/flynas/callback`, more as each app's recipe is verified). New
+`app_provisioning` table stashes, per VM, the minted `oidc_client_id`, the
+**once-only plaintext** `oidc_secret`, the rendered `redirect_uri`/`issuer`,
+and a `delivered` flag. `oidc.create_client`'s mint core was extracted to a
+shared `mint_client`; `oidc.provision_for_vm(conn, vm, tpl)` mints a
+VM-scoped client (`<vm>-sso`, redirect = `http://<guest-ip>:<port><path>`)
+and writes the stash. `apps.install` calls it best-effort (logs and continues
+on failure; the VM already exists). Verified on h2dev: installing Seafile
+mints the client + stash row (secret held, `delivered=0`) and returns an
+`sso` block; installing DokuWiki (no redirect path) mints nothing; VM delete
+sweeps both. **Still deferred — the actual guest delivery:**
+`apps.deliver_provisioning(vm_id)` is an inert documented stub; it needs the
+§2.9 VM LAN bridge + in-guest exec to render the app's OIDC config from the
+stash, push it into the guest, then set `delivered=1` and NULL the secret.
 
 ---
 

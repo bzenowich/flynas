@@ -73,6 +73,11 @@ migrate_column("app_templates", "monitor_type", "TEXT DEFAULT 'http'")
 migrate_column("app_templates", "monitor_port", "INTEGER")
 migrate_column("app_templates", "monitor_path", "TEXT DEFAULT '/'")
 migrate_column("app_templates", "monitor_expected", "INTEGER DEFAULT 200")
+-- §2.10 #3: per-app OIDC callback path. NULL ⇒ the app doesn't do SSO and
+-- install mints no client. Set per app as its guest provisioning is built
+-- (the exact callback path is app-specific). Seeded below for the apps we
+-- have provisioning recipes for; the rest stay NULL until verified.
+migrate_column("app_templates", "oidc_redirect_path", "TEXT")
 
 -- Seed the app catalog (idempotent on the unique name). Each entry's
 -- monitor_* fields become the auto-created monitor when installed.
@@ -96,6 +101,20 @@ for _, a in ipairs(APP_CATALOG) do
         a[1], a[2], a[3], a[4], a[5], a[6], a[7])
 end
 
+-- OIDC callback paths for the apps whose SSO provisioning is mapped out.
+-- Idempotent UPDATE (not part of the seed INSERT so it also patches rows
+-- that pre-date this column). The path is appended to the guest's base URL
+-- to form the registered redirect_uri at install time.
+local OIDC_REDIRECTS = {
+    Seafile = "/oauth/callback",                 -- Seafile OAuth client
+    Forgejo = "/user/oauth2/flynas/callback",    -- Forgejo OAuth2 source named "flynas"
+}
+for name, path in pairs(OIDC_REDIRECTS) do
+    conn:query(
+        "UPDATE app_templates SET oidc_redirect_path = ? " ..
+        "WHERE name = ? AND oidc_redirect_path IS NULL", path, name)
+end
+
 -- New tables (idempotent via IF NOT EXISTS)
 conn:exec([[
     CREATE TABLE IF NOT EXISTS ssh_keys (
@@ -103,6 +122,24 @@ conn:exec([[
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         label TEXT NOT NULL,
         public_key TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+]])
+
+-- §2.10 #3: per-VM SSO provisioning stash. install mints the oidc_client and
+-- records the once-only plaintext secret + rendered redirect/issuer here; the
+-- (deferred) guest provisioning step reads it, writes the app's OIDC config
+-- inside the guest, then sets delivered=1 and NULLs oidc_secret. The secret
+-- lives in the DB only between mint and delivery — never re-derivable from the
+-- client's argon2 hash. CASCADE so deleting the VM clears the stash.
+conn:exec([[
+    CREATE TABLE IF NOT EXISTS app_provisioning (
+        vm_id INTEGER PRIMARY KEY REFERENCES vms(id) ON DELETE CASCADE,
+        oidc_client_id INTEGER REFERENCES oidc_clients(id) ON DELETE SET NULL,
+        oidc_secret TEXT,
+        redirect_uri TEXT,
+        issuer TEXT,
+        delivered INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
     )
 ]])

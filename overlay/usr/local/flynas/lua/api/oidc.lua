@@ -328,6 +328,23 @@ local function require_admin()
     return user
 end
 
+-- Mint a client row: generate id + secret, hash, insert. Returns
+-- (record, err) with record = { id, client_id, secret }. Shared by the
+-- admin endpoint and the install-time auto-provisioner; takes a caller's
+-- conn and writes no HTTP response of its own.
+local function mint_client(conn, name, redirect_uris, vm_id)
+    local client_id = "flynas-" .. rand_hex(8)
+    local secret = ngx.encode_base64(rand_hex(16))
+    local hash, herr = argon2.hash(secret)
+    if not hash then return nil, "hash failed: " .. (herr or "?") end
+    local rows, derr = conn:query(
+        "INSERT INTO oidc_clients (vm_id, name, client_id, " ..
+        "client_secret_hash, redirect_uris) VALUES (?, ?, ?, ?, ?) RETURNING id",
+        vm_id, name, client_id, hash, table.concat(redirect_uris, "\n"))
+    if not rows then return nil, "insert failed: " .. (derr or "?") end
+    return { id = rows[1].id, client_id = client_id, secret = secret }, nil
+end
+
 -- POST /api/oidc/clients  { name, redirect_uris:[..], vm_id? }
 -- Returns the client_secret ONCE (only the hash is stored).
 function _M.create_client(body)
@@ -337,32 +354,49 @@ function _M.create_client(body)
         json.response({ error = "name and redirect_uris[] required" }, 400)
         return
     end
-    local client_id = "flynas-" .. rand_hex(8)
-    local secret = ngx.encode_base64(rand_hex(16))
-    local hash, herr = argon2.hash(secret)
-    if not hash then
-        json.response({ error = "hash failed: " .. (herr or "?") }, 500)
-        return
-    end
 
     local conn = open_db()
-    local rows, derr = conn:query(
-        "INSERT INTO oidc_clients (vm_id, name, client_id, " ..
-        "client_secret_hash, redirect_uris) VALUES (?, ?, ?, ?, ?) RETURNING id",
-        body.vm_id, body.name, client_id, hash,
-        table.concat(body.redirect_uris, "\n"))
+    local rec, err = mint_client(conn, body.name, body.redirect_uris, body.vm_id)
     conn:close()
-    if not rows then
-        json.response({ error = "insert failed: " .. (derr or "?") }, 500)
+    if not rec then
+        json.response({ error = err }, 500)
         return
     end
     json.response({
-        id = rows[1].id,
+        id = rec.id,
         name = body.name,
-        client_id = client_id,
-        client_secret = secret,        -- shown once
+        client_id = rec.client_id,
+        client_secret = rec.secret,    -- shown once
         issuer = issuer(),
     }, 201)
+end
+
+-- Auto-mint a VM-scoped client at app install and stash it for guest
+-- provisioning. Called from apps.install with that handler's `conn`;
+-- best-effort, so it returns (summary, err) instead of writing a response —
+-- the caller logs err and still completes the install. The plaintext secret
+-- is held in app_provisioning until the guest provisioning step delivers it.
+-- Returns nil,nil when the template isn't OIDC-capable (no redirect path).
+function _M.provision_for_vm(conn, vm, tpl)
+    if not tpl.oidc_redirect_path then return nil, nil end
+    if not vm.ip_address then return nil, "no guest IP yet" end
+    -- The app is served on the bridge at its monitor host:port; its OIDC
+    -- callback lives under that same base. Bridged guests are http + IP; a
+    -- future hostname/TLS front end would change only this base URL.
+    local base = string.format("http://%s:%d",
+        vm.ip_address, tpl.monitor_port or 80)
+    local redirect_uri = base .. tpl.oidc_redirect_path
+    local rec, err = mint_client(conn, vm.name .. "-sso", { redirect_uri }, vm.id)
+    if not rec then return nil, err end
+    local iss = issuer()
+    conn:query(
+        "INSERT OR REPLACE INTO app_provisioning " ..
+        "(vm_id, oidc_client_id, oidc_secret, redirect_uri, issuer, delivered) " ..
+        "VALUES (?, ?, ?, ?, ?, 0)",
+        vm.id, rec.id, rec.secret, redirect_uri, iss)
+    -- Summary omits the secret: that travels to the guest, not the API caller.
+    return { client_id = rec.client_id, redirect_uri = redirect_uri,
+             issuer = iss, pending = true }, nil
 end
 
 -- GET /api/oidc/clients
