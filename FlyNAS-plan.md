@@ -705,8 +705,15 @@ CRUD added: `GET /api/oidc/clients/:id/grants` (list user+role) and
 `groups` claim. Verified on h2dev via forged-session API test: ungranted
 non-admin → `access_denied`; after PUT → `code=` issued; CRUD round-trips;
 bad role → 400; non-admin on the admin endpoint → 403; admin SSO unaffected
-(browser e2e still green). Open items: a grants admin **UI** (Clay/Apps page),
-and the apps.lua auto-client-mint (waits on §2.9 guest provisioning).
+(browser e2e still green). **Grants admin UI — DONE (2026-06-29):** an "App
+access (SSO)" card on the Apps page lists registered `oidc_clients`; selecting
+one opens a user×grant matrix (checkbox to grant/revoke, per-grant user/admin
+role toggle), wired to `GET/PUT …/clients/:id/grants`. New Clay exports
+(ClearClients/AddClient/SetSelectedClient/ClearGrants/AddGrant/SetSsoMsg) +
+JS glue; string pool grown 144K→160K for the new SSO pool region. Verified
+on h2dev with `tools/uitest/test-sso-ui.mjs` (grant→DB role=user, toggle→admin,
+revoke→empty, all checked against the DB). Open item: the apps.lua
+auto-client-mint (waits on §2.9 guest provisioning).
 
 ---
 

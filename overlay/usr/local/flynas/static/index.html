@@ -299,6 +299,7 @@
     const MON_POOL_BASE = 98304;
     const VM_POOL_BASE = 114688;
     const APP_POOL_BASE = 131072;
+    const SSO_POOL_BASE = 147456;
 
     let authScreen = SCREEN_LOADING;
     let authInputText = '';
@@ -661,6 +662,9 @@
             handleAppAction(action, arg);
             return;
         }
+        if (action === PACT_CLIENT_SELECT) { selectClient(arg); return; }
+        if (action === PACT_GRANT_TOGGLE) { toggleGrant(arg); return; }
+        if (action === PACT_GRANT_ROLE) { toggleRole(arg); return; }
         if (action >= 36) {
             handleVmAction(action, arg);
             return;
@@ -1810,6 +1814,7 @@
             appError = 'load failed: ' + err;
         }
         syncApps();
+        loadSso();
     }
 
     function handleAppAction(action, arg) {
@@ -1855,6 +1860,109 @@
             return;
         }
         event.preventDefault();
+    }
+
+    // ----------------------------------------------------------------
+    // App access (SSO): manage app_grants per oidc_client. Pick a client,
+    // then grant/revoke users and toggle each grant's role. set_grants
+    // replaces the whole set, so every toggle PUTs the current map.
+    // ----------------------------------------------------------------
+    const PACT_CLIENT_SELECT = 48, PACT_GRANT_TOGGLE = 49, PACT_GRANT_ROLE = 50;
+
+    let ssoClients = [];
+    let ssoSelectedClient = 0;
+    let ssoAllUsers = [];          // [{id, username}]
+    let ssoGrants = {};            // user_id -> role ('user'|'admin') for the selected client
+    let ssoMsg = '';
+
+    function syncSso() {
+        let off = SSO_POOL_BASE;
+        const write = (str) => {
+            const bytes = textEncoder.encode(String(str).slice(0, 160));
+            new Uint8Array(instance.exports.memory.buffer, stringPoolBase + off, bytes.length).set(bytes);
+            const r = { off, len: bytes.length };
+            off += bytes.length;
+            return r;
+        };
+        instance.exports.ClearClients();
+        for (const c of ssoClients) {
+            const name = write(c.name), cid = write(c.client_id);
+            instance.exports.AddClient(c.id, name.off, name.len, cid.off, cid.len);
+        }
+        instance.exports.SetSelectedClient(ssoSelectedClient);
+        instance.exports.ClearGrants();
+        if (ssoSelectedClient) {
+            for (const u of ssoAllUsers) {
+                const role = ssoGrants[u.id];
+                const name = write(u.username);
+                instance.exports.AddGrant(u.id, name.off, name.len,
+                    role !== undefined, role === 'admin');
+            }
+        }
+        const m = write(ssoMsg);
+        instance.exports.SetSsoMsg(m.off, m.len);
+    }
+
+    async function loadSso() {
+        try {
+            const data = await getJSON('/api/oidc/clients');
+            ssoClients = Array.isArray(data.clients) ? data.clients : [];
+            // Drop a stale selection if the client is gone.
+            if (ssoSelectedClient && !ssoClients.some(c => c.id === ssoSelectedClient)) {
+                ssoSelectedClient = 0;
+            }
+        } catch (err) {
+            ssoMsg = 'load failed: ' + err;
+        }
+        if (ssoSelectedClient) await loadGrants(ssoSelectedClient);
+        else syncSso();
+    }
+
+    async function loadGrants(clientId) {
+        try {
+            const [grantsData, users] = await Promise.all([
+                getJSON('/api/oidc/clients/' + clientId + '/grants'),
+                getJSON('/api/users'),
+            ]);
+            ssoAllUsers = Array.isArray(users) ? users : [];
+            ssoGrants = {};
+            for (const g of (grantsData.grants || [])) ssoGrants[g.user_id] = g.role;
+            ssoMsg = '';
+        } catch (err) {
+            ssoMsg = 'load failed: ' + err;
+        }
+        syncSso();
+    }
+
+    function selectClient(id) {
+        // Toggle off if re-clicking the open client.
+        ssoSelectedClient = (ssoSelectedClient === id) ? 0 : id;
+        if (ssoSelectedClient) loadGrants(ssoSelectedClient);
+        else { ssoGrants = {}; syncSso(); }
+    }
+
+    async function putGrants() {
+        const grants = Object.entries(ssoGrants).map(([uid, role]) =>
+            ({ user_id: Number(uid), role }));
+        const { ok, data } = await sendJSON('PUT',
+            '/api/oidc/clients/' + ssoSelectedClient + '/grants', { grants });
+        if (!ok) ssoMsg = data.error || 'save failed';
+        await loadGrants(ssoSelectedClient);   // reflect server truth
+    }
+
+    function toggleGrant(uid) {
+        if (!ssoSelectedClient) return;
+        if (ssoGrants[uid] !== undefined) delete ssoGrants[uid];
+        else ssoGrants[uid] = 'user';
+        syncSso();          // optimistic
+        putGrants();
+    }
+
+    function toggleRole(uid) {
+        if (!ssoSelectedClient || ssoGrants[uid] === undefined) return;
+        ssoGrants[uid] = ssoGrants[uid] === 'admin' ? 'user' : 'admin';
+        syncSso();          // optimistic
+        putGrants();
     }
 
     let prevCpuTicks = null;

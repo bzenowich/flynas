@@ -61,7 +61,7 @@ CustomHTMLData* FrameAllocateCustomData(CustomHTMLData data) {
 // 81920..98303 backup page, 98304..114687 monitoring page,
 // 114688..131071 VMs page, 131072..147455 apps page
 // — keep in sync with index.html
-#define STRING_POOL_SIZE 147456
+#define STRING_POOL_SIZE 163840
 
 typedef struct {
     Clay_String name;
@@ -265,6 +265,9 @@ CLAY_WASM_EXPORT("TakeAction") int TakeAction(void) {
 #define PACT_VM_SUSPEND      40
 #define PACT_VM_RESUME       41
 #define PACT_APP_INSTALL     42
+#define PACT_CLIENT_SELECT   48
+#define PACT_GRANT_TOGGLE    49
+#define PACT_GRANT_ROLE      50
 #define PACT_VMNET_TOGGLE    43
 #define PACT_VM_SELECT       44
 #define PACT_FWD_ADD         45
@@ -988,6 +991,70 @@ void SetAppMsg(uint32_t errOff, uint32_t errLen,
                uint32_t infoOff, uint32_t infoLen) {
     appError = poolString(errOff, errLen);
     appInfo = poolString(infoOff, infoLen);
+}
+
+// ---------------------------------------------------------------
+// App access (SSO) state. Lists registered oidc_clients; selecting one
+// shows the user directory with a grant checkbox + role toggle per user.
+// Grants gate OIDC /authorize (see api/oidc.lua).
+// ---------------------------------------------------------------
+typedef struct {
+    int id;                 // oidc_clients.id
+    Clay_String name;
+    Clay_String client_id;
+} ClientRow;
+
+typedef struct {
+    int id;                 // users.id
+    Clay_String username;
+    bool granted;
+    bool admin;             // grant role == "admin"
+} GrantRow;
+
+static ClientRow ssoClients[MAX_ROWS];
+static int ssoClientCount = 0;
+static GrantRow ssoGrants[MAX_ROWS];
+static int ssoGrantCount = 0;
+static int ssoSelectedClient = 0;   // oidc_clients.id, 0 = none selected
+static Clay_String ssoMsg;
+
+CLAY_WASM_EXPORT("ClearClients") void ClearClients(void) {
+    ssoClientCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddClient")
+void AddClient(int id, uint32_t nameOff, uint32_t nameLen,
+               uint32_t cidOff, uint32_t cidLen) {
+    if (ssoClientCount >= MAX_ROWS) return;
+    ssoClients[ssoClientCount++] = (ClientRow) {
+        .id = id,
+        .name = poolString(nameOff, nameLen),
+        .client_id = poolString(cidOff, cidLen),
+    };
+}
+
+CLAY_WASM_EXPORT("SetSelectedClient") void SetSelectedClient(int id) {
+    ssoSelectedClient = id;
+}
+
+CLAY_WASM_EXPORT("ClearGrants") void ClearGrants(void) {
+    ssoGrantCount = 0;
+}
+
+CLAY_WASM_EXPORT("AddGrant")
+void AddGrant(int id, uint32_t nameOff, uint32_t nameLen,
+              bool granted, bool admin) {
+    if (ssoGrantCount >= MAX_ROWS) return;
+    ssoGrants[ssoGrantCount++] = (GrantRow) {
+        .id = id,
+        .username = poolString(nameOff, nameLen),
+        .granted = granted, .admin = admin,
+    };
+}
+
+CLAY_WASM_EXPORT("SetSsoMsg")
+void SetSsoMsg(uint32_t off, uint32_t len) {
+    ssoMsg = poolString(off, len);
 }
 
 // ---------------------------------------------------------------
@@ -2281,8 +2348,89 @@ void AppsCard(void) {
     }
 }
 
+// App access (SSO): pick a registered client, then grant/revoke users and
+// toggle each grant's role. Mirrors the Accounts group-membership matrix.
+void SsoCard(void) {
+    CARD("SsoCard") {
+        CardTitle(CLAY_STRING("App access (SSO)"));
+        if (ssoClientCount == 0) {
+            CLAY_TEXT(CLAY_STRING("No SSO apps registered yet"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 15, .textColor = COLOR_MUTED }));
+        }
+        for (int i = 0; i < ssoClientCount; i++) {
+            ClientRow *c = &ssoClients[i];
+            bool open = (ssoSelectedClient == c->id);
+            CLAY(CLAY_IDI("SsoClient", c->id), { .layout = {
+                .sizing = { .width = CLAY_SIZING_GROW(0) },
+                .childGap = 10,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+            } }) {
+                CLAY(CLAY_IDI("SsoClientName", c->id), {
+                    .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } },
+                    .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                }) {
+                    Clay_OnHover(HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_CLIENT_SELECT, c->id));
+                    CLAY_TEXT(c->name, CLAY_TEXT_CONFIG({
+                        .fontId = FONT_ID_BODY, .fontSize = 16,
+                        .textColor = open ? COLOR_ACCENT : COLOR_TEXT,
+                        .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                    }));
+                }
+                CLAY_TEXT(c->client_id, CLAY_TEXT_CONFIG({
+                    .fontId = FONT_ID_MONO, .fontSize = 13, .textColor = COLOR_MUTED }));
+            }
+            if (open) {
+                CLAY(CLAY_IDI("SsoGrants", c->id), { .layout = {
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                    .sizing = { .width = CLAY_SIZING_GROW(0) },
+                    .padding = { 16, 0, 2, 6 },
+                    .childGap = 4,
+                } }) {
+                    for (int j = 0; j < ssoGrantCount; j++) {
+                        GrantRow *u = &ssoGrants[j];
+                        CLAY(CLAY_IDI("SsoGrantRow", u->id), { .layout = {
+                            .sizing = { .width = CLAY_SIZING_GROW(0) },
+                            .childGap = 8,
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                        } }) {
+                            CLAY(CLAY_IDI("SsoGrantBox", u->id), {
+                                .userData = FrameAllocateCustomData((CustomHTMLData) { .cursorPointer = true }),
+                            }) {
+                                Clay_OnHover(HandlePageButton, (void *)(intptr_t)PACT_PACK(PACT_GRANT_TOGGLE, u->id));
+                                CLAY_TEXT(u->granted ? CLAY_STRING("[x]") : CLAY_STRING("[ ]"),
+                                    CLAY_TEXT_CONFIG({
+                                        .fontId = FONT_ID_MONO, .fontSize = 15,
+                                        .textColor = u->granted ? COLOR_ACCENT : COLOR_MUTED,
+                                        .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                                    }));
+                            }
+                            CLAY_TEXT(u->username, CLAY_TEXT_CONFIG({
+                                .fontId = FONT_ID_MONO, .fontSize = 15, .textColor = COLOR_TEXT,
+                                .userData = FrameAllocateCustomData((CustomHTMLData) { .disablePointerEvents = true }),
+                            }));
+                            // Role toggle, only meaningful for granted users.
+                            if (u->granted) {
+                                CLAY_AUTO_ID({ .layout = { .sizing = { .width = CLAY_SIZING_GROW(0) } } }) {}
+                                SmallButton(CLAY_IDI("SsoGrantRole", u->id),
+                                    u->admin ? CLAY_STRING("admin") : CLAY_STRING("user"),
+                                    u->admin ? COLOR_WARN : COLOR_ACCENT, HandlePageButton,
+                                    (void *)(intptr_t)PACT_PACK(PACT_GRANT_ROLE, u->id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (ssoMsg.length > 0) {
+            CLAY_TEXT(ssoMsg, CLAY_TEXT_CONFIG({
+                .fontId = FONT_ID_BODY, .fontSize = 14, .textColor = COLOR_BAD }));
+        }
+    }
+}
+
 void AppsPage(void) {
     AppsCard();
+    SsoCard();
     if (appError.length > 0) {
         CLAY_TEXT(appError, CLAY_TEXT_CONFIG({
             .fontId = FONT_ID_BODY, .fontSize = 16, .textColor = COLOR_BAD }));
