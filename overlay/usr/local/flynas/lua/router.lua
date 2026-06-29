@@ -340,6 +340,8 @@ local pattern_routes = {
     { "DELETE", "^forwards/(%d+)$",              function(id) vms_api.delete_forward(tonumber(id)) end },
     { "POST",   "^apps/(%d+)/install$",          function(id) apps_api.install(tonumber(id), read_body()) end },
     { "DELETE", "^oidc/clients/(%d+)$",          function(id) oidc_api.delete_client(tonumber(id)) end },
+    { "GET",    "^oidc/clients/(%d+)/grants$",    function(id) oidc_api.list_grants(tonumber(id)) end },
+    { "PUT",    "^oidc/clients/(%d+)/grants$",    function(id) oidc_api.set_grants(tonumber(id), read_body()) end },
 }
 
 local key = method .. ":" .. path

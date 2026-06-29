@@ -695,9 +695,18 @@ guard accept/reject cases unit-tested.
 **Gotcha:** this OpenResty has no `resty.sha256` (same gap as `resty.http`,
 §2.8) — PKCE S256 hashing moved to `openssl dgst` in `util/jwt.sha256_b64url`.
 The http-context error log is `/var/log/flynas/error.log`, *not*
-`logs/error.log` (that's only the master log). Open items: the apps.lua auto-client-mint
-(waits on §2.9 guest provisioning), and the `app_grants` write path (claims
-read `ag.role` but nothing creates grants yet — needs an admin CRUD/policy).
+`logs/error.log` (that's only the master log). **`app_grants` write path + enforcement — DONE (2026-06-29):** policy is
+**grants gate access** — a non-admin with no grant for a client is denied at
+`/authorize` (spec-style `redirect_uri?error=access_denied&state=`); admins
+always pass (and already carry the `admin` group via `user_groups`). Admin
+CRUD added: `GET /api/oidc/clients/:id/grants` (list user+role) and
+`PUT …/grants` (replace the full set, `{grants:[{user_id,role}]}`, role ∈
+{user,admin}; mirrors `groups.set_members`). Grant role still feeds the
+`groups` claim. Verified on h2dev via forged-session API test: ungranted
+non-admin → `access_denied`; after PUT → `code=` issued; CRUD round-trips;
+bad role → 400; non-admin on the admin endpoint → 403; admin SSO unaffected
+(browser e2e still green). Open items: a grants admin **UI** (Clay/Apps page),
+and the apps.lua auto-client-mint (waits on §2.9 guest provisioning).
 
 ---
 

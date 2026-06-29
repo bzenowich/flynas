@@ -165,6 +165,23 @@ function _M.authorize()
         return ngx.redirect("/?return=" .. ngx.escape_uri(target), 302)
     end
 
+    -- Per-app authorization. Admins always pass; everyone else needs an
+    -- app_grant for this client. Denial follows the OIDC error-redirect
+    -- convention (bounce back to the app with error=access_denied) rather
+    -- than showing a FlyNAS page the app can't interpret.
+    if user.is_admin ~= 1 then
+        local grant = conn:query_one(
+            "SELECT 1 FROM app_grants WHERE client_id = ? AND user_id = ?",
+            client.id, user.id)
+        if not grant then
+            conn:close()
+            local sep = a.redirect_uri:find("?", 1, true) and "&" or "?"
+            local loc = a.redirect_uri .. sep .. "error=access_denied"
+            if a.state then loc = loc .. "&state=" .. ngx.escape_uri(a.state) end
+            return ngx.redirect(loc, 302)
+        end
+    end
+
     local code = rand_hex(32)
     conn:query(
         "INSERT INTO oidc_codes (code, client_id, user_id, redirect_uri, " ..
@@ -366,6 +383,67 @@ function _M.delete_client(id)
     conn:query("DELETE FROM oidc_clients WHERE id = ?", id)
     conn:close()
     json.response({ deleted = id })
+end
+
+-- ---- App access grants (admin) ---------------------------------------
+-- Grants gate /authorize: a non-admin with no grant for a client cannot
+-- log into that app (admins always can). The grant's role also feeds the
+-- `groups` claim ("admin" vs "user") via build_claims.
+
+-- GET /api/oidc/clients/:id/grants → who may access this app + their role
+function _M.list_grants(client_id)
+    if not require_admin() then return end
+    local conn = open_db()
+    local rows = conn:query(
+        "SELECT ag.user_id, u.username, ag.role FROM app_grants ag " ..
+        "JOIN users u ON u.id = ag.user_id WHERE ag.client_id = ? " ..
+        "ORDER BY u.username", client_id) or {}
+    conn:close()
+    json.response({ grants = rows })
+end
+
+-- PUT /api/oidc/clients/:id/grants  { grants: [{ user_id, role }] }
+-- Replaces the client's full grant set (mirrors groups.set_members).
+function _M.set_grants(client_id, body)
+    if not require_admin() then return end
+    if not body or type(body.grants) ~= "table" then
+        json.response({ error = "grants[] required" }, 400)
+        return
+    end
+    for _, g in ipairs(body.grants) do
+        if type(g.user_id) ~= "number" then
+            json.response({ error = "each grant needs a numeric user_id" }, 400)
+            return
+        end
+        if g.role and g.role ~= "user" and g.role ~= "admin" then
+            json.response({ error = "role must be 'user' or 'admin'" }, 400)
+            return
+        end
+    end
+
+    local conn = open_db()
+    local client = conn:query_one(
+        "SELECT id FROM oidc_clients WHERE id = ?", client_id)
+    if not client then
+        conn:close()
+        json.response({ error = "invalid_client" }, 404)
+        return
+    end
+
+    conn:query("DELETE FROM app_grants WHERE client_id = ?", client_id)
+    local count = 0
+    for _, g in ipairs(body.grants) do
+        -- Skip unknown users rather than failing the whole set.
+        local u = conn:query_one("SELECT id FROM users WHERE id = ?", g.user_id)
+        if u then
+            conn:query(
+                "INSERT INTO app_grants (user_id, client_id, role) " ..
+                "VALUES (?, ?, ?)", g.user_id, client_id, g.role or "user")
+            count = count + 1
+        end
+    end
+    conn:close()
+    json.response({ client_id = client_id, count = count })
 end
 
 return _M
