@@ -370,7 +370,21 @@
         }
     }
 
+    // OIDC SSO handoff: /api/oidc/authorize bounces a logged-out user to
+    // /?return=<original authorize URL>. Once we hold a session (already had
+    // one, or just logged in) we send the browser back to finish the flow.
+    // Same-origin guard: only a local /api/oidc/authorize path — never a
+    // protocol-relative (//host) or absolute URL — so this can't open-redirect.
+    function consumeOidcReturn() {
+        const raw = new URLSearchParams(location.search).get('return');
+        if (!raw || raw[0] !== '/' || raw[1] === '/') return false;
+        if (!raw.startsWith('/api/oidc/authorize')) return false;
+        window.location.replace(raw);
+        return true;
+    }
+
     function enterMain() {
+        if (consumeOidcReturn()) return;
         setupToken = null;
         loginToken = null;
         authScreen = SCREEN_MAIN;

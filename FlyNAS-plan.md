@@ -685,12 +685,19 @@ access_token) → userinfo. id_token claims correct (`sub`/`name`/
 `preferred_username`/`nonce`/`groups:["admin"]`); `email` correctly omitted
 when the user has none. Negatives all reject: code replay → `invalid_grant`,
 wrong PKCE verifier → `invalid_grant/pkce`, no/garbage bearer → `invalid_token`.
+**SPA `return`-param handoff — DONE (2026-06-28):** `enterMain()` (the single
+post-login chokepoint, reached by both already-have-session and fresh-login
+paths) now calls `consumeOidcReturn()`, which reads `?return=`, rejects any
+non-local / protocol-relative / non-`/api/oidc/authorize` value (open-redirect
+guard), and `window.location.replace()`s back to finish the flow. Backend 302
+shape (`/?return=%2Fapi%2Foidc%2Fauthorize%3F…`) confirmed against the guard;
+guard accept/reject cases unit-tested.
 **Gotcha:** this OpenResty has no `resty.sha256` (same gap as `resty.http`,
 §2.8) — PKCE S256 hashing moved to `openssl dgst` in `util/jwt.sha256_b64url`.
 The http-context error log is `/var/log/flynas/error.log`, *not*
-`logs/error.log` (that's only the master log). Open items: SPA login
-`return`-param handoff for the 302 path, and the apps.lua auto-client-mint
-(waits on §2.9 guest provisioning).
+`logs/error.log` (that's only the master log). Open items: the apps.lua auto-client-mint
+(waits on §2.9 guest provisioning), and the `app_grants` write path (claims
+read `ag.role` but nothing creates grants yet — needs an admin CRUD/policy).
 
 ---
 
