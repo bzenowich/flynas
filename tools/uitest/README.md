@@ -63,6 +63,17 @@ Preconditions (seed via API before running, clean up after):
   Cleanest with an empty vms table and no orphan `seafiletest.img`.
   Installs the 7th catalog Install button (alphabetical: Seafile).
 
+- test-oidc: none (run via `sh run-oidc.sh`, which seeds + cleans up its
+  own `uitest-oidc` oidc_client). Drives the §2.10 SSO login `return`-param
+  handoff end-to-end: logged-out `/api/oidc/authorize` → bounce → TOTP login
+  → `consumeOidcReturn()` replays authorize → app callback with `code`+`state`;
+  also asserts the open-redirect guard rejects `?return=//evil`.
+
+TOTP gotcha: `totp()` is computed on the **host** clock, but the server
+validates against the **VM** clock. The h2dev VM drifts (no steady NTP); >~30s
+skew makes every login fail with "invalid code". Before a run, sync it:
+`ssh h2dev date -u $(date -u +%Y%m%d%H%M.%S)`.
+
 Notes:
 
 - Clay only registers a press if the mouse button is held across a
