@@ -762,11 +762,14 @@ static int do_ntp(const char *server)
 
 #define QEMU_CMD "/usr/local/bin/qemu-system-x86_64"
 #define QEMU_IMG_CMD "/usr/local/bin/qemu-img"
+#define MKISOFS_CMD "/usr/local/bin/mkisofs"
 #define KLDLOAD_CMD "/sbin/kldload"
 #define IFCONFIG_CMD "/sbin/ifconfig"
 #define VM_RUN_DIR "/var/run/flynas"
 #define VM_SYS_DIR "/usr/local/flynas/vms"
 #define VM_IMAGES_DIR "/usr/local/flynas/images"   /* cached base cloud images */
+#define VM_SEED_DIR "/usr/local/flynas/seeds"       /* per-VM NoCloud cidata seeds (root 0700) */
+#define MAX_USERDATA 65536
 #define VM_BRIDGE "flynas0"
 
 static int iface_exists(const char *name);   /* defined with the bridge ops */
@@ -944,6 +947,82 @@ static int do_vmcreate(const char *name, const char *gb, const char *volume,
     return 0;
 }
 
+/* Slurp all of stdin into buf (NUL-terminated), up to cap-1 bytes.
+ * A single read() can short-read on a pipe, so loop. */
+static ssize_t slurp_stdin(char *buf, size_t cap)
+{
+    size_t total = 0;
+    ssize_t n;
+    while (total < cap - 1 &&
+           (n = read(STDIN_FILENO, buf + total, cap - 1 - total)) > 0)
+        total += (size_t)n;
+    buf[total] = '\0';
+    return (ssize_t)total;
+}
+
+/* vmseed <name> <hostname>: build a NoCloud "cidata" seed ISO for a VM.
+ * user-data is read from stdin (it may carry the once-only OIDC secret);
+ * meta-data is synthesized (instance-id + hostname). Output ISO lands at
+ * VM_SEED_DIR/<name>.iso (root, 0600); do_vmstart auto-attaches it when it
+ * exists. Re-running rebuilds it. Plan §2.11 step 3. */
+static int do_vmseed(const char *name, const char *hostname)
+{
+    char dir[512], meta[600], user[600], iso[600];
+    static char udata[MAX_USERDATA];
+    ssize_t n;
+    FILE *f;
+
+    if (!valid_name(name)) die("invalid vm name");
+    if (!valid_name(hostname)) die("invalid hostname");
+
+    n = slurp_stdin(udata, sizeof(udata));
+    if (n <= 0) die("empty user-data on stdin");
+
+    mkdir(VM_SEED_DIR, 0700);
+    chmod(VM_SEED_DIR, 0700);
+    snprintf(dir, sizeof(dir), "%s/%s.d", VM_SEED_DIR, name);
+    mkdir(dir, 0700);
+    chmod(dir, 0700);
+
+    snprintf(meta, sizeof(meta), "%s/meta-data", dir);
+    f = fopen(meta, "w");
+    if (!f) die("failed to write meta-data");
+    fprintf(f, "instance-id: flynas-%s\nlocal-hostname: %s\n", name, hostname);
+    fclose(f);
+    chmod(meta, 0600);
+
+    snprintf(user, sizeof(user), "%s/user-data", dir);
+    f = fopen(user, "w");
+    if (!f) die("failed to write user-data");
+    fwrite(udata, 1, (size_t)n, f);
+    fclose(f);
+    chmod(user, 0600);
+
+    snprintf(iso, sizeof(iso), "%s/%s.iso", VM_SEED_DIR, name);
+    unlink(iso);
+    char *args[] = { "mkisofs", "-quiet", "-output", iso,
+        "-volid", "cidata", "-joliet", "-rock", dir, NULL };
+    if (run(MKISOFS_CMD, args) != 0)
+        die("mkisofs failed");
+    chmod(iso, 0600);
+    printf("%s\n", iso);
+    return 0;
+}
+
+/* Remove a VM's seed ISO + staging dir (best-effort; called from delete). */
+static void vmseed_cleanup(const char *name)
+{
+    char iso[600], user[600], meta[600], dir[512];
+    snprintf(iso, sizeof(iso), "%s/%s.iso", VM_SEED_DIR, name);
+    snprintf(dir, sizeof(dir), "%s/%s.d", VM_SEED_DIR, name);
+    snprintf(user, sizeof(user), "%s/user-data", dir);
+    snprintf(meta, sizeof(meta), "%s/meta-data", dir);
+    unlink(iso);
+    unlink(user);
+    unlink(meta);
+    rmdir(dir);
+}
+
 /* vmstart <name> <cpus> <ram_mb> <imagepath> <tap> <mac|-> <iso|->:
  * load nvmm, bring up the tap, launch QEMU daemonized under NVMM. */
 static int do_vmstart(char *argv[])
@@ -953,6 +1032,8 @@ static int do_vmstart(char *argv[])
     char sock[256], serial[256], pid[256];
     char drivebuf[600], netbuf[128], devbuf[128];
     char qmpbuf[300], serbuf[300];
+    char seedpath[600], seeddrivebuf[640];
+    int have_seed;
     struct stat st;
 
     if (!valid_name(name)) die("invalid vm name");
@@ -1007,6 +1088,11 @@ static int do_vmstart(char *argv[])
     snprintf(drivebuf, sizeof(drivebuf),
         "file=%s,format=%s,if=virtio", image,
         is_qcow2(image) ? "qcow2" : "raw");
+
+    /* Auto-attach a NoCloud seed if one was built for this VM (cloud-init
+     * reads the "cidata" label off this 2nd virtio disk on first boot). */
+    snprintf(seedpath, sizeof(seedpath), "%s/%s.iso", VM_SEED_DIR, name);
+    have_seed = (stat(seedpath, &st) == 0 && S_ISREG(st.st_mode));
     snprintf(netbuf, sizeof(netbuf),
         "tap,id=net0,ifname=%s,script=no,downscript=no", tap);
     if (strcmp(mac, "-") == 0)
@@ -1023,6 +1109,11 @@ static int do_vmstart(char *argv[])
     a[n++] = "-m"; a[n++] = (char *)ram;
     a[n++] = "-smp"; a[n++] = (char *)cpus;
     a[n++] = "-drive"; a[n++] = drivebuf;
+    if (have_seed) {
+        snprintf(seeddrivebuf, sizeof(seeddrivebuf),
+            "file=%s,format=raw,if=virtio", seedpath);
+        a[n++] = "-drive"; a[n++] = seeddrivebuf;
+    }
     a[n++] = "-netdev"; a[n++] = netbuf;
     a[n++] = "-device"; a[n++] = devbuf;
     if (strcmp(iso, "-") != 0) {
@@ -1099,6 +1190,7 @@ static int do_vmdelete(const char *name, const char *volume)
     vm_image_path(name, volume, path, sizeof(path));
     if (access(path, F_OK) == 0 && unlink(path) != 0)
         die("failed to remove disk image");
+    vmseed_cleanup(name);
     return 0;
 }
 
@@ -1523,6 +1615,11 @@ int main(int argc, char *argv[])
         if (argc != 9)
             die("usage: flynas-helper vmstart <name> <cpus> <ram_mb> <image> <tap> <mac|-> <iso|->");
         rc = do_vmstart(argv);
+
+    } else if (strcmp(cmd, "vmseed") == 0) {
+        if (argc != 4)
+            die("usage: flynas-helper vmseed <name> <hostname>  (user-data on stdin)");
+        rc = do_vmseed(argv[2], argv[3]);
 
     } else if (strcmp(cmd, "vmstop") == 0) {
         if (argc != 4)

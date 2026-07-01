@@ -785,11 +785,18 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    (basename-only, no `..`/`/`) + existence check reject traversal. `exec.vm_create`
    passes the base through. Verified: overlay+backing correct, raw regression
    intact, `../../etc/passwd` and missing-base rejected.
-3. **Seed ISO generation (new helper verb `vmseed` + Lua).** Build a NoCloud
-   ISO (`cidata`) holding `meta-data` + `user-data` per app VM; needs
-   `genisoimage`/`mkisofs`/`cdrtools` in pkg — confirm on DragonFly. Attach as a
-   second drive at start. C-side: restrict paths to the seed dir, www can't
-   inject arbitrary files.
+3. **Seed ISO generation (`vmseed` helper verb). DONE (verified h2dev
+   2026-06-30).** `flynas-helper vmseed <name> <hostname>` reads the full
+   cloud-config **user-data from stdin** (via `run_with_stdin`, like
+   `passwd`/`sshkeys` — keeps the once-only OIDC secret out of argv and off
+   www-writable paths), synthesizes `meta-data` (`instance-id: flynas-<name>` +
+   `local-hostname`), and `mkisofs -volid cidata` → `/usr/local/flynas/seeds/
+   <name>.iso` (root 0600). `do_vmstart` **auto-attaches** that ISO as a 2nd
+   `if=virtio` drive when it exists — no arg threading, plain VMs unaffected.
+   `vmdelete` sweeps the seed + staging dir. `exec.vm_seed(name,hostname,
+   user_data)` wraps it. Verified end-to-end: overlay → vmseed → vmstart
+   auto-attach → cloud-init consumed the seed (`hostname=appvm` + runcmd marker
+   on serial); empty-stdin rejected; delete sweeps the seed.
 4. **Per-app recipe → cloud-init template (Forgejo first).** `app_templates`
    gains a `cloud_init`/`compose` field (or reuse `post_install_script` as the
    user-data body with placeholders). Forgejo user-data: install Docker, write
@@ -966,8 +973,12 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   `/usr/local/flynas/images/alpine.qcow2`; `flynas-helper` `vmcreate` gained
   `[base|-]` → COW qcow2 overlay (208KiB) or raw as before, `vmstart` picks the
   format via qcow2-magic sniff (`is_qcow2`) so plain VMs stay raw and Lua paths
-  are untouched; `valid_basename` blocks traversal. Next: Step 3 (`vmseed`
-  helper verb + NoCloud seed generation).
+  are untouched; `valid_basename` blocks traversal. **Step 3 DONE + verified:**
+  `vmseed` helper verb builds a NoCloud `cidata` seed from stdin user-data →
+  `/usr/local/flynas/seeds/<name>.iso` (root 0600); `vmstart` auto-attaches it
+  as a 2nd virtio drive when present; `vmdelete` sweeps it; `exec.vm_seed`
+  wraps it. Verified end-to-end on h2dev (overlay → seed → boot → cloud-init
+  consumed). Next: Step 4 (Forgejo cloud-init recipe + `app_templates` field).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button

@@ -131,6 +131,13 @@ function _M.vm_start(name, cpus, ram_mb, image, tap, mac, iso)
         image, tap, mac or "-", iso or "-" })
 end
 
+-- Build the NoCloud cidata seed for a VM. user_data is the full
+-- cloud-config document (may carry the once-only OIDC secret) and is
+-- piped over stdin; vmstart auto-attaches the resulting ISO. §2.11 step 3.
+function _M.vm_seed(name, hostname, user_data)
+    return run_with_stdin({ "vmseed", name, hostname or name }, user_data)
+end
+
 function _M.vm_stop(name, tap)
     return run({ "vmstop", name, tap })
 end
