@@ -1,0 +1,49 @@
+#cloud-config
+# FlyNAS app recipe: Forgejo (single container, SQLite) with FlyNAS SSO.
+# Double-brace placeholders are filled by util/cloudinit.render at first Start;
+# the once-only OIDC secret rides in this seed (root 0600) into the guest.
+write_files:
+  - path: /root/provision-app.sh
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      # Provision Forgejo + register the FlyNAS OIDC login source. All output
+      # goes to the serial console (this image's /dev/console is the
+      # framebuffer, not ttyS0 — write ttyS0 explicitly).
+      set -eu
+      log() { echo "===FLYNAS-APP: $*" > /dev/ttyS0; }
+
+      log "installing docker"
+      apk add --no-cache docker docker-cli-compose
+
+      log "starting cgroups + docker"
+      rc-update add cgroups boot
+      rc-service cgroups start
+      rc-update add docker boot
+      rc-service docker start
+      i=0; while [ $i -lt 30 ]; do docker info >/dev/null 2>&1 && break; i=$((i+1)); sleep 2; done
+
+      log "starting forgejo container"
+      docker run -d --name {{APP_NAME}} --restart always \
+        -p {{APP_PORT}}:3000 \
+        -v /var/lib/{{APP_NAME}}:/data \
+        -e FORGEJO__server__ROOT_URL='http://{{GUEST_IP}}:{{APP_PORT}}/' \
+        -e FORGEJO__security__INSTALL_LOCK=true \
+        codeberg.org/forgejo/forgejo:11
+
+      log "waiting for forgejo http"
+      i=0; while [ $i -lt 60 ]; do wget -qO- http://127.0.0.1:{{APP_PORT}}/ >/dev/null 2>&1 && break; i=$((i+1)); sleep 2; done
+
+      log "registering FlyNAS OIDC login source"
+      docker exec -u git {{APP_NAME}} forgejo admin auth add-oauth \
+        --name flynas \
+        --provider openidConnect \
+        --key '{{CLIENT_ID}}' \
+        --secret '{{CLIENT_SECRET}}' \
+        --auto-discover-url '{{ISSUER}}/.well-known/openid-configuration' \
+        --scopes 'openid email profile' \
+        && log "OIDC source registered" || log "OIDC registration FAILED"
+
+      log "provisioning DONE"
+runcmd:
+  - [ sh, -c, "/root/provision-app.sh > /dev/ttyS0 2>&1 || echo '===FLYNAS-APP: provision-app.sh errored' > /dev/ttyS0" ]

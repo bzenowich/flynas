@@ -115,6 +115,29 @@ for name, path in pairs(OIDC_REDIRECTS) do
         "WHERE name = ? AND oidc_redirect_path IS NULL", path, name)
 end
 
+-- §2.11 step 4: per-app cloud-init recipe (the guest user-data template,
+-- {{KEY}} placeholders filled at first Start). Recipes live as files in
+-- lua/recipes/<file>.yaml so each app's is reviewable on its own and the
+-- catalog stays lean; loaded here into app_templates.cloud_init. UPDATE
+-- (not set-if-null) so a redeploy propagates recipe fixes. Apps without a
+-- recipe file keep cloud_init NULL and can't be provisioned yet.
+migrate_column("app_templates", "cloud_init", "TEXT")
+local RECIPE_DIR = "/usr/local/flynas/lua/recipes"
+local RECIPES = {
+    Forgejo = "forgejo",
+}
+for name, file in pairs(RECIPES) do
+    local fh = io.open(RECIPE_DIR .. "/" .. file .. ".yaml", "r")
+    if fh then
+        local body = fh:read("*a")
+        fh:close()
+        if body and #body > 0 then
+            conn:query("UPDATE app_templates SET cloud_init = ? WHERE name = ?",
+                body, name)
+        end
+    end
+end
+
 -- New tables (idempotent via IF NOT EXISTS)
 conn:exec([[
     CREATE TABLE IF NOT EXISTS ssh_keys (

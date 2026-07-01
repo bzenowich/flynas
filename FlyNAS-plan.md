@@ -797,14 +797,24 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    user_data)` wraps it. Verified end-to-end: overlay → vmseed → vmstart
    auto-attach → cloud-init consumed the seed (`hostname=appvm` + runcmd marker
    on serial); empty-stdin rejected; delete sweeps the seed.
-4. **Per-app recipe → cloud-init template (Forgejo first).** `app_templates`
-   gains a `cloud_init`/`compose` field (or reuse `post_install_script` as the
-   user-data body with placeholders). Forgejo user-data: install Docker, write
-   `compose.yml` running `codeberg.org/forgejo/forgejo`, env-inject OIDC
-   (`client_id`/`secret`/`issuer`/`redirect_uri`) from the stash,
-   `docker compose up -d`. Here `apps.install` stops being best-effort SSO-stash
-   and **renders the seed** — folding `deliver_provisioning` into seed-build:
-   render user-data from stash → build seed → `delivered=1`, NULL the secret.
+4. **Per-app recipe → cloud-init template (Forgejo first). DONE (renderer
+   verified h2dev 2026-06-30; live guest boot deferred to step 7).**
+   `app_templates` gained a `cloud_init` column, loaded from per-app recipe
+   files `lua/recipes/<app>.yaml` (idempotent UPDATE at init, so redeploys
+   propagate fixes; scales to the other 8 apps in step 8). `recipes/forgejo.yaml`
+   installs Docker (+ the `cgroups`-before-`docker` fix from step 0), runs
+   `codeberg.org/forgejo/forgejo` (single container, SQLite), and registers the
+   FlyNAS OIDC login source via `forgejo admin auth add-oauth`; all output to
+   `/dev/ttyS0` (step-0 console gotcha). `util/cloudinit.render` fills `{{KEY}}`
+   placeholders and **errors on any unresolved one** (no half-rendered secret
+   reaches a guest); `apps.render_user_data(conn, vm, tpl)` assembles the vars
+   from the VM + OIDC stash (client_id from `oidc_clients`, once-only secret +
+   redirect/issuer from `app_provisioning`). Verified: render consistency test
+   (luajit) — all 6 recipe placeholders map, guard fires, extra vars ignored;
+   recipe loads into the live DB (2067 B), `apps.lua` require-chain resolves on
+   restart. The **seed-build wiring** (render → `vm_seed` → `delivered=1`, NULL
+   secret) lands in step 6 (first Start), the **live Forgejo boot + OIDC CLI
+   tuning** in step 7.
 5. **Issuer reachability (the TLS wrinkle). DECIDED: plain HTTP on the bridge.**
    Guest hits the issuer at `10.77.0.1` over the NAT bridge; `https://<host>`
    cert won't match. First slice exposes OIDC over **plain HTTP bound to
@@ -978,7 +988,14 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   `/usr/local/flynas/seeds/<name>.iso` (root 0600); `vmstart` auto-attaches it
   as a 2nd virtio drive when present; `vmdelete` sweeps it; `exec.vm_seed`
   wraps it. Verified end-to-end on h2dev (overlay → seed → boot → cloud-init
-  consumed). Next: Step 4 (Forgejo cloud-init recipe + `app_templates` field).
+  consumed). **Step 4 DONE + verified:** `app_templates.cloud_init` loaded from
+  per-app `lua/recipes/<app>.yaml` files; `recipes/forgejo.yaml` (Docker +
+  cgroups fix + Forgejo container + `admin auth add-oauth` OIDC source);
+  `util/cloudinit.render` (`{{KEY}}` fill, errors on unresolved) +
+  `apps.render_user_data` (vars from VM + OIDC stash). Verified: luajit render
+  test (placeholders map, guard fires) + recipe loads into live DB, require
+  chain resolves. Next: Step 5 (issuer over plain HTTP on the `10.77.0.1`
+  bridge — the stashed `issuer` is still the public HTTPS host).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button

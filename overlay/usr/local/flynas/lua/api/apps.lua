@@ -3,10 +3,37 @@ local db = require("util.db")
 local exec = require("util.exec")
 local vmnet = require("util.vmnet")
 local oidc = require("api.oidc")
+local cloudinit = require("util.cloudinit")
 
 local DB_PATH = "/usr/local/flynas/flynas.db"
 
 local _M = {}
+
+-- Render a VM's guest user-data from its app template's cloud-init recipe
+-- and the per-VM OIDC stash (client_id from oidc_clients, the once-only
+-- secret + rendered redirect/issuer from app_provisioning). Returns
+-- (user_data, nil) or (nil, err). Called at first Start (§2.11 step 6) to
+-- feed exec.vm_seed. §2.11 step 4.
+function _M.render_user_data(conn, vm, tpl)
+    if not tpl.cloud_init then
+        return nil, "app has no cloud-init recipe"
+    end
+    local prov = conn:query_one(
+        "SELECT p.oidc_secret, p.redirect_uri, p.issuer, c.client_id " ..
+        "FROM app_provisioning p " ..
+        "LEFT JOIN oidc_clients c ON c.id = p.oidc_client_id " ..
+        "WHERE p.vm_id = ?", vm.id) or {}
+    local vars = {
+        APP_NAME      = vm.name,
+        APP_PORT      = tostring(tpl.monitor_port or 80),
+        GUEST_IP      = vm.ip_address or "",
+        CLIENT_ID     = prov.client_id,
+        CLIENT_SECRET = prov.oidc_secret,
+        ISSUER        = prov.issuer,
+        REDIRECT_URI  = prov.redirect_uri,
+    }
+    return cloudinit.render(tpl.cloud_init, vars)
+end
 
 local function open_db()
     local conn = db.open(DB_PATH)
