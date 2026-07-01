@@ -14,7 +14,10 @@ write_files:
       log() { echo "===FLYNAS-APP: $*" > /dev/ttyS0; }
 
       log "installing docker"
-      apk add --no-cache docker docker-cli-compose
+      # iptables is required for Docker's -p port publishing (DNAT); minimal
+      # Alpine doesn't pull it in, so the published port is silently
+      # unreachable from outside the guest without it.
+      apk add --no-cache docker docker-cli-compose iptables ip6tables
 
       log "starting cgroups + docker"
       rc-update add cgroups boot
@@ -32,20 +35,29 @@ write_files:
         -v /var/lib/{{APP_NAME}}:/data \
         -e FORGEJO__server__ROOT_URL='{{ROOT_URL}}' \
         -e FORGEJO__security__INSTALL_LOCK=true \
+        -e FORGEJO__database__SQLITE_TIMEOUT=30 \
         codeberg.org/forgejo/forgejo:11
 
       log "waiting for forgejo http"
       i=0; while [ $i -lt 60 ]; do wget -qO- http://127.0.0.1:{{APP_PORT}}/ >/dev/null 2>&1 && break; i=$((i+1)); sleep 2; done
 
       log "registering FlyNAS OIDC login source"
-      docker exec -u git {{APP_NAME}} forgejo admin auth add-oauth \
-        --name flynas \
-        --provider openidConnect \
-        --key '{{CLIENT_ID}}' \
-        --secret '{{CLIENT_SECRET}}' \
-        --auto-discover-url '{{ISSUER}}/.well-known/openid-configuration' \
-        --scopes 'openid email profile' \
-        && log "OIDC source registered" || log "OIDC registration FAILED"
+      # The add-oauth CLI opens the same SQLite DB as the running server and can
+      # hit "database is locked"; SQLITE_TIMEOUT (above) plus a short retry make
+      # it converge. Skip if a source named "flynas" already exists (idempotent).
+      reg=fail
+      for t in 1 2 3 4 5; do
+        if docker exec {{APP_NAME}} forgejo admin auth list 2>/dev/null | grep -qw flynas; then reg=exists; break; fi
+        if docker exec -u git {{APP_NAME}} forgejo admin auth add-oauth \
+            --name flynas \
+            --provider openidConnect \
+            --key '{{CLIENT_ID}}' \
+            --secret '{{CLIENT_SECRET}}' \
+            --auto-discover-url '{{ISSUER}}/.well-known/openid-configuration' \
+            --scopes 'openid email profile'; then reg=ok; break; fi
+        sleep 5
+      done
+      log "OIDC registration: $reg"
 
       log "provisioning DONE"
 runcmd:

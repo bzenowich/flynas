@@ -773,9 +773,15 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
 
 **Ordered plan:**
 
-1. **Stage base cloud image (host). DONE (h2dev 2026-06-30).** Alpine `generic`
-   qcow2 cached at `/usr/local/flynas/images/alpine.qcow2` (system dir chosen).
-   Real installer should fetch it; for now copied from the Step 0 spike.
+1. **Stage base cloud image (host). DONE (h2dev 2026-06-30/07-01).** Alpine
+   `generic` qcow2 cached at `/usr/local/flynas/images/alpine.qcow2` (system
+   dir). **Must be patched with `no_timer_check`** (see step 7): the stock image
+   flakily kernel-panics at boot under NVMM ("IO-APIC + timer doesn't work").
+   Patch procedure (needs a Linux host — DragonFly can't write ext4): the image
+   is a partitionless whole-disk ext4 with extlinux; use `debugfs -w` (rootless)
+   to rewrite `/boot/extlinux.conf`'s APPEND line, adding `no_timer_check` and
+   moving `console=ttyS0,115200n8` last (also fixes the step-0 `/dev/console`=
+   framebuffer issue). Installer TODO: fetch + apply this once. [[nvmm-guest-ioapic-panic]]
 2. **qcow2 backing in the helper (`flynas-helper.c`). DONE (verified h2dev
    2026-06-30).** `do_vmcreate` gained an optional 4th arg `[base|-]`: base ⇒ a
    COW qcow2 overlay (`create -f qcow2 -b <VM_IMAGES_DIR>/<base> -F qcow2 <disk>
@@ -856,10 +862,27 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    + browser-facing redirect; first Start → seed built/attached, flags flipped,
    secret nulled, rendered `ROOT_URL`/`--key`/`--auto-discover-url` all correct;
    delete sweeps everything.
-7. **Verify end-to-end (Forgejo).** Install → VM boots → cloud-init pulls the
-   container → Forgejo up on the bridge IP → monitor green → browse via
-   port-forward → SSO login bounces through `/api/oidc/authorize` → logged in.
-   Extend `tools/uitest/test-apps.mjs`.
+7. **Verify end-to-end (Forgejo). IN PROGRESS (h2dev 2026-07-01) — pipeline
+   proven, recipe last-mile tuning.** Brought up flynas0, installed + started
+   Forgejo, watched provisioning over serial. **Hit + fixed the hard blocker:**
+   the stock Alpine image flakily kernel-panics under NVMM ("IO-APIC + timer
+   doesn't work") — reliably at ≥2048MB, independent of smp/machine/acpi. Fix =
+   `no_timer_check` in the base image's extlinux cmdline (patched via `debugfs`
+   on a Linux host; 3/3 clean boots at 2048MB after). With that, the **whole
+   pipeline runs end to end**: overlay boots → cloud-init → `apk add docker` (+
+   cgroups fix) → Forgejo container pulled over NAT + started → internal
+   healthcheck passes → OIDC source registration attempted. **Two last-mile
+   recipe issues found + fixed (confirming re-run pending):** (a) Docker `-p`
+   publishing was unreachable externally — minimal Alpine lacks `iptables`
+   (added); (b) `add-oauth` hit SQLite "database is locked" vs the running
+   server — added `FORGEJO__database__SQLITE_TIMEOUT` + an idempotent retry.
+   **Still to confirm:** Forgejo reachable via the port-forward + OIDC source
+   registered, then the browser SSO round-trip (needs slirp tunnels on h2dev:
+   outer-QEMU port → h2dev:20001, plus the existing 443 tunnel).
+   **Bug noted (separate):** dnsmasq handed the guest a dynamic IP (.211) despite
+   a correct reservation for .101 — a SIGHUP/timing race in the reservation path;
+   worked around by retargeting the forward. Extend `tools/uitest/test-apps.mjs`
+   once green.
 8. **Generalize.** Once Forgejo is green, port the recipe pattern to the other 8
    (a compose/user-data body per template): Seafile, Jellyfin, VaultWarden, etc.
 
@@ -1037,8 +1060,18 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   `vm_seed` → provisioned=1/delivered=1/secret nulled. Fixed a setuid mkisofs
   priv-drop (`run_root` forces child ruid=0). Verified via forged-session API
   (install→overlay+forward+redirect; start→seed attached, flags, rendered
-  ROOT_URL/key/discover-url correct). Next: Step 7 (live Forgejo boot + SSO
-  E2E — needs the flynas0 bridge up on h2dev + tunnels for the browser).
+  ROOT_URL/key/discover-url correct).
+- **2026-07-01**: Step 7 live E2E (in progress). Fixed the hard blocker — stock
+  Alpine flakily kernel-panics under NVMM ("IO-APIC + timer doesn't work");
+  baked `no_timer_check` into the base image's extlinux cmdline via `debugfs`
+  on a Linux host (whole-disk ext4, rootless), 3/3 clean boots at 2048MB after.
+  Whole provisioning pipeline then ran end to end on h2dev: install → qcow2
+  overlay → seed → boot → cloud-init → Docker (cgroups fix) → Forgejo container
+  pulled+started → healthcheck passed → OIDC registration attempted. Two
+  last-mile recipe fixes applied (Alpine needs `iptables` for Docker `-p`;
+  add-oauth SQLite lock → SQLITE_TIMEOUT + retry); confirming re-run + browser
+  SSO round-trip pending. Separate bug noted: dnsmasq gave a dynamic IP despite
+  a correct .101 reservation (SIGHUP/timing race).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button
