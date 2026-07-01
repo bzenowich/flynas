@@ -837,13 +837,25 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    **Known gap for step 6:** the stashed `redirect_uri` (and Forgejo `ROOT_URL`)
    still use the guest IP:port; for real browser SSO they must be the
    external_url + the app's **port-forward** — wire that with step 6.
-6. **Wire install orchestration. DECIDED: stage-and-provision-on-first-Start.**
-   `apps.install` mints the OIDC client, stashes provisioning, and stages the
-   seed spec — but does **not** boot the VM. The seed is rendered + built and the
-   guest provisions on the **first Start** (so install stays fast/idempotent and
-   Start owns the qcow2+seed boot). `deliver_provisioning` folds into that
-   first-Start seed-build: render user-data from the stash → build seed →
-   `delivered=1`, NULL the secret.
+6. **Wire install orchestration. DONE (verified h2dev 2026-06-30).**
+   `apps.install` now: creates the disk as a **COW qcow2 overlay** of the cached
+   Alpine base (`BASE_IMAGE`); auto-creates a **port-forward** (`host_port =
+   20000+vm.id → guest app port`) so the app is LAN-reachable; and mints/stashes
+   the OIDC client with a **browser-facing** `redirect_uri` (`http://<external
+   host>:<host_port><path>`, external host from `config.external_url` or the
+   admin's request Host). It does **not** boot the VM. On the **first Start**
+   (`vms.start`, gated by a new `vms.provisioned` flag): `render_user_data`
+   (recipe + stash, `ROOT_URL` derived from the registered redirect so they
+   always match) → `exec.vm_seed` (auto-attached by vmstart) → set
+   `provisioned=1`, `delivered=1`, NULL the secret. Renders fail loudly rather
+   than boot an unprovisioned app. `deliver_provisioning` superseded (no-op).
+   **Gotcha fixed:** cdrtools `mkisofs` drops to the real uid when it detects
+   it's setuid, so it couldn't read the root-only seed dir under the helper —
+   added `run_root()` (forces child ruid=0 via `setreuid`) for the mkisofs exec.
+   Verified via forged-session API: install → qcow2 overlay + forward 20001→3000
+   + browser-facing redirect; first Start → seed built/attached, flags flipped,
+   secret nulled, rendered `ROOT_URL`/`--key`/`--auto-discover-url` all correct;
+   delete sweeps everything.
 7. **Verify end-to-end (Forgejo).** Install → VM boots → cloud-init pulls the
    container → Forgejo up on the bridge IP → monitor green → browse via
    port-forward → SSO login bounces through `/api/oidc/authorize` → logged in.
@@ -1018,8 +1030,15 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   stashes `BRIDGE_ISSUER`. Verified guest-sim discovery/jwks over :80, the
   external_url split, 443 unaffected. Known gap: stashed `redirect_uri` /
   Forgejo `ROOT_URL` still guest-IP-based — fix in step 6 with external_url +
-  port-forward. Next: Step 6 (first-Start orchestration: render → vm_seed →
-  start → delivered=1/NULL secret; wire base image + qcow2 into install).
+  port-forward. **Step 6 DONE + verified:** `apps.install` builds a qcow2
+  overlay of the Alpine base, auto-creates a port-forward (20000+id→app port),
+  and stashes a browser-facing redirect_uri (external host + host_port);
+  first Start (`vms.start`, gated by `vms.provisioned`) renders the recipe →
+  `vm_seed` → provisioned=1/delivered=1/secret nulled. Fixed a setuid mkisofs
+  priv-drop (`run_root` forces child ruid=0). Verified via forged-session API
+  (install→overlay+forward+redirect; start→seed attached, flags, rendered
+  ROOT_URL/key/discover-url correct). Next: Step 7 (live Forgejo boot + SSO
+  E2E — needs the flynas0 bridge up on h2dev + tunnels for the browser).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button

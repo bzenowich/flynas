@@ -66,6 +66,9 @@ migrate_column("sessions", "state", "TEXT DEFAULT 'active'")
 migrate_column("vms", "volume", "TEXT")
 -- VMs: which app template this VM was installed from (NULL = manual)
 migrate_column("vms", "app_template", "TEXT")
+-- VMs: whether the app VM's cloud-init seed has been built (first Start).
+-- 0 ⇒ next Start renders the recipe → seed → provisions the guest. §2.11 #6.
+migrate_column("vms", "provisioned", "INTEGER DEFAULT 0")
 
 -- App templates: description + default monitor definition
 migrate_column("app_templates", "description", "TEXT")

@@ -6,6 +6,9 @@ local oidc = require("api.oidc")
 local cloudinit = require("util.cloudinit")
 
 local DB_PATH = "/usr/local/flynas/flynas.db"
+-- Cached base cloud image every app VM overlays (COW qcow2). Staged under
+-- /usr/local/flynas/images/ (installer TODO to fetch it). §2.11 #1.
+local BASE_IMAGE = "alpine.qcow2"
 
 local _M = {}
 
@@ -23,14 +26,21 @@ function _M.render_user_data(conn, vm, tpl)
         "FROM app_provisioning p " ..
         "LEFT JOIN oidc_clients c ON c.id = p.oidc_client_id " ..
         "WHERE p.vm_id = ?", vm.id) or {}
+    -- The app's browser-facing base = the registered redirect_uri minus the
+    -- app's OIDC callback path. Deriving ROOT_URL this way guarantees the
+    -- callback Forgejo builds matches exactly what /authorize will accept.
+    local root_url = prov.redirect_uri
+    if prov.redirect_uri and tpl.oidc_redirect_path then
+        root_url = prov.redirect_uri:sub(1,
+            #prov.redirect_uri - #tpl.oidc_redirect_path) .. "/"
+    end
     local vars = {
         APP_NAME      = vm.name,
         APP_PORT      = tostring(tpl.monitor_port or 80),
-        GUEST_IP      = vm.ip_address or "",
+        ROOT_URL      = root_url,
         CLIENT_ID     = prov.client_id,
         CLIENT_SECRET = prov.oidc_secret,
         ISSUER        = prov.issuer,
-        REDIRECT_URI  = prov.redirect_uri,
     }
     return cloudinit.render(tpl.cloud_init, vars)
 end
@@ -94,7 +104,9 @@ function _M.install(id, body)
     local ip = body.ip_address
     if ip == "" then ip = nil end
 
-    local ok, err = exec.vm_create(body.name, disk, volume or "-")
+    -- App VMs boot a COW qcow2 overlay of the cached Alpine base; cloud-init
+    -- installs the app on first Start (§2.11).
+    local ok, err = exec.vm_create(body.name, disk, volume or "-", BASE_IMAGE)
     if not ok then
         conn:close()
         ngx.log(ngx.ERR, "app install vmcreate failed: ", err)
@@ -140,11 +152,28 @@ function _M.install(id, body)
         end
     end
 
+    -- Auto port-forward so the app is reachable from the LAN: host_port
+    -- (deterministic, avoids collisions) → guest's published app port. The
+    -- browser-facing base (external host + host_port) drives the OIDC
+    -- redirect_uri / Forgejo ROOT_URL below. §2.11 #6.
+    local app_base
+    if ip then
+        local host_port = 20000 + vm.id
+        local guest_port = tpl.monitor_port or 80
+        conn:query(
+            "INSERT INTO port_forwards (vm_id, proto, host_port, guest_port) " ..
+            "VALUES (?, 'tcp', ?, ?)", vm.id, host_port, guest_port)
+        app_base = string.format("http://%s:%d",
+            oidc.external_host(conn), host_port)
+        vm.url = app_base .. "/"
+    end
+
     -- Auto-mint an OIDC client for SSO-capable apps and stash it for guest
     -- provisioning (§2.10 #3). Best-effort: the VM already exists, so a mint
-    -- failure is logged but never fails the install.
+    -- failure is logged but never fails the install. The stashed redirect_uri
+    -- uses the browser-facing app_base so it matches what the guest registers.
     if tpl.oidc_redirect_path then
-        local sso, sso_err = oidc.provision_for_vm(conn, vm, tpl)
+        local sso, sso_err = oidc.provision_for_vm(conn, vm, tpl, app_base)
         if sso then
             vm.sso = sso
         elseif sso_err then
@@ -153,20 +182,18 @@ function _M.install(id, body)
     end
 
     vmnet.sync_dhcp(conn)
+    vmnet.sync_forwards(conn)
     conn:close()
     vm.status = "stopped"
     json.response(vm, 201)
 end
 
--- Deliver a VM's stashed SSO config into the guest. STUB pending §2.9 guest
--- provisioning (the VM LAN bridge + in-guest exec): with those, this will
--- read app_provisioning, render the app's OIDC settings (issuer, client_id,
--- the once-only oidc_secret, redirect_uri) via the template's
--- post_install_script, push them into the guest, then set delivered=1 and
--- NULL oidc_secret. Until the bridge lands there is no channel to the guest,
--- so this is intentionally inert.
+-- SUPERSEDED (§2.11 #6). Guest SSO delivery no longer needs an in-guest exec
+-- channel: the OIDC config is baked into the NoCloud seed at first Start
+-- (vms.start → render_user_data → exec.vm_seed), which sets delivered=1 and
+-- NULLs the secret. Kept as a no-op for any lingering callers.
 function _M.deliver_provisioning(vm_id)
-    return nil, "guest provisioning not implemented (needs the VM LAN bridge, §2.9)"
+    return nil, "delivery happens at first Start via the cloud-init seed (§2.11 #6)"
 end
 
 return _M

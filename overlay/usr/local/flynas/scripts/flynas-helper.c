@@ -947,6 +947,28 @@ static int do_vmcreate(const char *name, const char *gb, const char *volume,
     return 0;
 }
 
+/* Like run(), but forces the child's *real* uid to root before exec. cdrtools
+ * mkisofs drops privileges to the real uid when it detects it's setuid; our
+ * seed dir is root-only (it holds the OIDC secret), so mkisofs must keep
+ * ruid=0 to read it and write the ISO. euid is already 0 here (setuid bit). */
+static int run_root(const char *path, char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        die("fork failed");
+    if (pid == 0) {
+        if (setreuid(0, 0) != 0)
+            _exit(126);
+        execv(path, argv);
+        _exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return 1;
+}
+
 /* Slurp all of stdin into buf (NUL-terminated), up to cap-1 bytes.
  * A single read() can short-read on a pipe, so loop. */
 static ssize_t slurp_stdin(char *buf, size_t cap)
@@ -1002,7 +1024,7 @@ static int do_vmseed(const char *name, const char *hostname)
     unlink(iso);
     char *args[] = { "mkisofs", "-quiet", "-output", iso,
         "-volid", "cidata", "-joliet", "-rock", dir, NULL };
-    if (run(MKISOFS_CMD, args) != 0)
+    if (run_root(MKISOFS_CMD, args) != 0)
         die("mkisofs failed");
     chmod(iso, 0600);
     printf("%s\n", iso);

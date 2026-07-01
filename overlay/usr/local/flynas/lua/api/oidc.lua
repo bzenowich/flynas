@@ -66,6 +66,17 @@ local function authorize_base(conn)
     return issuer()
 end
 
+-- Bare host (no scheme/port/path) the browser uses to reach FlyNAS and, via
+-- port-forwards, its apps. From config.external_url, else the current request
+-- Host (the admin's browser host at install time). §2.11 #5/#6.
+function _M.external_host(conn)
+    local row = conn:query_one(
+        "SELECT value FROM config WHERE key = 'external_url'")
+    local url = (row and row.value and #row.value > 0 and row.value)
+        or ngx.var.http_host or "localhost"
+    return (url:gsub("^%w+://", ""):gsub("/.*$", ""):gsub(":%d+$", ""))
+end
+
 -- The active user for the current session cookie, or nil (no response).
 local function session_user(conn)
     local cookie = ngx.var.cookie_flynas_session
@@ -409,13 +420,13 @@ end
 -- the caller logs err and still completes the install. The plaintext secret
 -- is held in app_provisioning until the guest provisioning step delivers it.
 -- Returns nil,nil when the template isn't OIDC-capable (no redirect path).
-function _M.provision_for_vm(conn, vm, tpl)
+function _M.provision_for_vm(conn, vm, tpl, app_base)
     if not tpl.oidc_redirect_path then return nil, nil end
     if not vm.ip_address then return nil, "no guest IP yet" end
-    -- The app is served on the bridge at its monitor host:port; its OIDC
-    -- callback lives under that same base. Bridged guests are http + IP; a
-    -- future hostname/TLS front end would change only this base URL.
-    local base = string.format("http://%s:%d",
+    -- app_base is the app's browser-facing base (external host + port-forward),
+    -- passed by apps.install once the forward exists. Falls back to the guest
+    -- bridge IP:port — reachable only where the browser shares the bridge (dev).
+    local base = app_base or string.format("http://%s:%d",
         vm.ip_address, tpl.monitor_port or 80)
     local redirect_uri = base .. tpl.oidc_redirect_path
     local rec, err = mint_client(conn, vm.name .. "-sso", { redirect_uri }, vm.id)

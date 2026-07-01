@@ -177,6 +177,37 @@ function _M.start(id)
         json.response({ error = "vm already running" }, 409)
         return
     end
+
+    -- First Start of an app VM: render the app's cloud-init recipe from the
+    -- OIDC stash → build the NoCloud seed (vmstart auto-attaches it) → mark
+    -- provisioned + consume the once-only secret. Fail loudly rather than boot
+    -- an app that can't provision. §2.11 #6.
+    if vm.app_template and (vm.provisioned or 0) == 0 then
+        local tpl = conn:query_one(
+            "SELECT * FROM app_templates WHERE name = ?", vm.app_template)
+        if tpl and tpl.cloud_init then
+            local apps = require("api.apps")
+            local user_data, rerr = apps.render_user_data(conn, vm, tpl)
+            if not user_data then
+                conn:close()
+                ngx.log(ngx.ERR, "app seed render failed: ", rerr)
+                json.response({ error = "seed render failed: " .. (rerr or "?") }, 500)
+                return
+            end
+            local sok, serr = exec.vm_seed(vm.name, vm.name, user_data)
+            if not sok then
+                conn:close()
+                ngx.log(ngx.ERR, "app seed build failed: ", serr)
+                json.response({ error = "seed build failed: " .. (serr or "?") }, 500)
+                return
+            end
+            conn:query("UPDATE vms SET provisioned = 1 WHERE id = ?", vm.id)
+            -- Secret is now baked into the seed; consume the stash copy.
+            conn:query("UPDATE app_provisioning SET delivered = 1, " ..
+                "oidc_secret = NULL WHERE vm_id = ?", vm.id)
+        end
+    end
+
     local ok, err = exec.vm_start(vm.name, vm.cpus, vm.ram_mb,
         image_path(vm), vm_tap(vm), vm.mac_address, vm.iso_path or "-")
     if not ok then

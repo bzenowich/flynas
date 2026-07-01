@@ -24,10 +24,13 @@ write_files:
       i=0; while [ $i -lt 30 ]; do docker info >/dev/null 2>&1 && break; i=$((i+1)); sleep 2; done
 
       log "starting forgejo container"
+      # ROOT_URL is the browser-facing base (external host + port-forward) so
+      # Forgejo builds an OAuth callback that matches the registered
+      # redirect_uri. APP_PORT is the guest-internal published port.
       docker run -d --name {{APP_NAME}} --restart always \
         -p {{APP_PORT}}:3000 \
         -v /var/lib/{{APP_NAME}}:/data \
-        -e FORGEJO__server__ROOT_URL='http://{{GUEST_IP}}:{{APP_PORT}}/' \
+        -e FORGEJO__server__ROOT_URL='{{ROOT_URL}}' \
         -e FORGEJO__security__INSTALL_LOCK=true \
         codeberg.org/forgejo/forgejo:11
 
