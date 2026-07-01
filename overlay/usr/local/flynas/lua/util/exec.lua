@@ -122,8 +122,8 @@ end
 
 -- VMs (QEMU/NVMM). Paths are validated server-side and contain no
 -- spaces, so the unquoted run() join is safe.
-function _M.vm_create(name, gb, volume)
-    return run({ "vmcreate", name, tostring(gb), volume or "-" })
+function _M.vm_create(name, gb, volume, base)
+    return run({ "vmcreate", name, tostring(gb), volume or "-", base or "-" })
 end
 
 function _M.vm_start(name, cpus, ram_mb, image, tap, mac, iso)

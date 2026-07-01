@@ -734,6 +734,98 @@ stash, push it into the guest, then set `delivered=1` and NULL the secret.
 
 ---
 
+### 2.11 Guest Provisioning — PLANNED (make app VMs functional: OS + app + SSO)
+
+**Problem.** Everything up to §2.10 stops at an *empty* VM: `apps.install`
+creates the disk, mints the OIDC client, and stashes provisioning, but the
+disk boots to nothing — no guest OS, no app, no config push, and
+`deliver_provisioning` is inert. This section is the plan to close that gap.
+
+**Decisions (2026-06-30):**
+- **Provisioning mechanism: cloud-init + Docker.** One generic Linux cloud
+  image + a per-VM NoCloud seed ISO (label `cidata`) carrying `user-data`.
+  cloud-init installs Docker, runs the app's official container, **and writes
+  the app's OIDC config from the stash at first boot.** One uniform mechanism
+  across all apps. This collapses guest SSO delivery into seed-build — no
+  in-guest exec channel needed, so `deliver_provisioning` becomes "render +
+  build the seed," not "SSH into the guest."
+- **Base image: Alpine (nocloud), not Debian.** ~50MB vs ~350MB → smaller
+  backing file, faster stage, less COW churn, smaller attack surface. musl is
+  a non-issue because the apps run in containers that bring their own libc;
+  Alpine-as-Docker-host is well-trodden (`apk add docker`). *Caveat:* Alpine's
+  cloud-init/NoCloud is younger than Debian's (Alpine historically shipped
+  `tiny-cloud`); Step 0 de-risks this, fallbacks are Alpine `tiny-cloud` or a
+  minimal custom seed-consuming init, or Debian 12 if it fights.
+- **VMM: stay QEMU + NVMM.** Firecracker was considered and rejected — it
+  talks to `/dev/kvm` directly (no KVM on DragonFly; only NVMM), has no NVMM
+  backend, and its whole value (125ms boot / seccomp jailer) is a multi-month
+  KVM→NVMM Rust rewrite that barely applies to long-lived services. If VM
+  *density/lightness* ever matters, spike QEMU's native `microvm` machine type
+  (virtio-mmio, direct `-kernel` boot) on NVMM instead — same VMM we run.
+- **First app (vertical slice): Forgejo** — single container, clean OIDC,
+  redirect path already seeded.
+
+**Step 0 — de-risk spike (h2dev).** Stage the Alpine nocloud qcow2 under
+QEMU+NVMM, hand-build a `cidata` seed ISO that writes a file + starts a
+container, boot it, confirm cloud-init consumes the seed. Also validates the
+qcow2-backing (Step 2) + seed-ISO (Step 3) mechanics on the real target before
+any app work. If cloud-init fights on Alpine, fall back per the caveat above.
+
+**Ordered plan:**
+
+1. **Stage base cloud image (host). DONE (h2dev 2026-06-30).** Alpine `generic`
+   qcow2 cached at `/usr/local/flynas/images/alpine.qcow2` (system dir chosen).
+   Real installer should fetch it; for now copied from the Step 0 spike.
+2. **qcow2 backing in the helper (`flynas-helper.c`). DONE (verified h2dev
+   2026-06-30).** `do_vmcreate` gained an optional 4th arg `[base|-]`: base ⇒ a
+   COW qcow2 overlay (`create -f qcow2 -b <VM_IMAGES_DIR>/<base> -F qcow2 <disk>
+   <gb>g`, 208KiB overlay), `-` ⇒ raw as before. `do_vmstart` picks the drive
+   format by **reading the qcow2 magic** (`is_qcow2()`), so the disk stays named
+   `<name>.img` and Lua `image_path`/delete are untouched. New `valid_basename`
+   (basename-only, no `..`/`/`) + existence check reject traversal. `exec.vm_create`
+   passes the base through. Verified: overlay+backing correct, raw regression
+   intact, `../../etc/passwd` and missing-base rejected.
+3. **Seed ISO generation (new helper verb `vmseed` + Lua).** Build a NoCloud
+   ISO (`cidata`) holding `meta-data` + `user-data` per app VM; needs
+   `genisoimage`/`mkisofs`/`cdrtools` in pkg — confirm on DragonFly. Attach as a
+   second drive at start. C-side: restrict paths to the seed dir, www can't
+   inject arbitrary files.
+4. **Per-app recipe → cloud-init template (Forgejo first).** `app_templates`
+   gains a `cloud_init`/`compose` field (or reuse `post_install_script` as the
+   user-data body with placeholders). Forgejo user-data: install Docker, write
+   `compose.yml` running `codeberg.org/forgejo/forgejo`, env-inject OIDC
+   (`client_id`/`secret`/`issuer`/`redirect_uri`) from the stash,
+   `docker compose up -d`. Here `apps.install` stops being best-effort SSO-stash
+   and **renders the seed** — folding `deliver_provisioning` into seed-build:
+   render user-data from stash → build seed → `delivered=1`, NULL the secret.
+5. **Issuer reachability (the TLS wrinkle). DECIDED: plain HTTP on the bridge.**
+   Guest hits the issuer at `10.77.0.1` over the NAT bridge; `https://<host>`
+   cert won't match. First slice exposes OIDC over **plain HTTP bound to
+   `10.77.0.1`**, and the discovery `issuer` is that guest-facing URL. (CA-trust
+   via cloud-init deferred; the bridge is host-internal NAT so HTTP there is not
+   LAN-exposed.)
+6. **Wire install orchestration. DECIDED: stage-and-provision-on-first-Start.**
+   `apps.install` mints the OIDC client, stashes provisioning, and stages the
+   seed spec — but does **not** boot the VM. The seed is rendered + built and the
+   guest provisions on the **first Start** (so install stays fast/idempotent and
+   Start owns the qcow2+seed boot). `deliver_provisioning` folds into that
+   first-Start seed-build: render user-data from the stash → build seed →
+   `delivered=1`, NULL the secret.
+7. **Verify end-to-end (Forgejo).** Install → VM boots → cloud-init pulls the
+   container → Forgejo up on the bridge IP → monitor green → browse via
+   port-forward → SSO login bounces through `/api/oidc/authorize` → logged in.
+   Extend `tools/uitest/test-apps.mjs`.
+8. **Generalize.** Once Forgejo is green, port the recipe pattern to the other 8
+   (a compose/user-data body per template): Seafile, Jellyfin, VaultWarden, etc.
+
+**Open decisions — all resolved (2026-06-30):**
+- ~~Auto-start on install vs. provision-on-first-Start~~ → **first-Start** (Step 6).
+- ~~Issuer HTTP-on-bridge vs. CA-trust~~ → **plain HTTP on the bridge** (Step 5).
+- ~~Confirm `mkisofs`~~ → present (`/usr/local/bin/mkisofs`, cdrtools); Step 0
+  spike used it to build the `cidata` seed.
+
+---
+
 ## Phase 3: Frontend (Clay UI)
 
 ### 3.1 Build Setup — DONE
@@ -859,6 +951,23 @@ stash, push it into the guest, then set `delivered=1` and NULL the secret.
 
 ## Progress Log
 
+- **2026-06-30**: Guest provisioning kickoff (§2.11). Decided the mechanism —
+  **cloud-init + Docker on an Alpine `generic` cloud image**, per-VM NoCloud
+  `cidata` seed; **QEMU+NVMM kept, Firecracker rejected** (KVM-only, no NVMM
+  backend, multi-month rewrite for no gain on long-lived services); issuer =
+  **plain HTTP on the `10.77.0.1` bridge**; **provision on first Start**, not
+  install; **Forgejo** the first vertical slice. **Step 0 spike VERIFIED on
+  h2dev:** qcow2 COW overlay boots under NVMM with a `mkisofs -volid cidata`
+  seed; cloud-init applies hostname/`write_files`/`runcmd`; `apk add docker` +
+  `docker run hello-world` prints "Hello from Docker!". Two recipe gotchas
+  surfaced: image `/dev/console` = framebuffer `tty0` not `ttyS0` (write
+  markers to `/dev/ttyS0`); Docker needs `rc-service cgroups start` before
+  `docker start`. **Steps 1–2 DONE + verified:** base image staged at
+  `/usr/local/flynas/images/alpine.qcow2`; `flynas-helper` `vmcreate` gained
+  `[base|-]` → COW qcow2 overlay (208KiB) or raw as before, `vmstart` picks the
+  format via qcow2-magic sniff (`is_qcow2`) so plain VMs stay raw and Lua paths
+  are untouched; `valid_basename` blocks traversal. Next: Step 3 (`vmseed`
+  helper verb + NoCloud seed generation).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button

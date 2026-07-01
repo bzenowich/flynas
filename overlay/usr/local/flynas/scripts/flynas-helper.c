@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <ctype.h>
 #include <pwd.h>
 #include <sys/types.h>
@@ -765,6 +766,7 @@ static int do_ntp(const char *server)
 #define IFCONFIG_CMD "/sbin/ifconfig"
 #define VM_RUN_DIR "/var/run/flynas"
 #define VM_SYS_DIR "/usr/local/flynas/vms"
+#define VM_IMAGES_DIR "/usr/local/flynas/images"   /* cached base cloud images */
 #define VM_BRIDGE "flynas0"
 
 static int iface_exists(const char *name);   /* defined with the bridge ops */
@@ -835,6 +837,38 @@ static int valid_vmpath(const char *p)
 
 /* Build the disk image path for <name> on <volume> ("-" = system dir).
  * Verifies a data volume is actually mounted. */
+/* A cached base-image filename: basename only (no '/'), no "..", starts
+ * alnum, drawn from [alnum . _ -]. Resolved under VM_IMAGES_DIR by the
+ * caller — www never passes a path, only a name. */
+static int valid_basename(const char *s)
+{
+    size_t len;
+    if (!s || !*s) return 0;
+    len = strlen(s);
+    if (len >= 128 || strstr(s, "..") || strchr(s, '/')) return 0;
+    if (!isalnum((unsigned char)s[0])) return 0;
+    for (const char *c = s; *c; c++) {
+        if (!(isalnum((unsigned char)*c) || *c == '.' ||
+              *c == '_' || *c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+/* True if the file begins with the qcow2 magic ("QFI\xfb"). Lets vmstart
+ * pick the -drive format without threading it through the DB: app VMs are
+ * qcow2 overlays, plain VMs are raw, both named <name>.img. */
+static int is_qcow2(const char *path)
+{
+    unsigned char m[4];
+    int fd = open(path, O_RDONLY);
+    ssize_t r;
+    if (fd < 0) return 0;
+    r = read(fd, m, 4);
+    close(fd);
+    return r == 4 && m[0] == 'Q' && m[1] == 'F' && m[2] == 'I' && m[3] == 0xfb;
+}
+
 static void vm_image_path(const char *name, const char *volume,
                           char *buf, size_t size)
 {
@@ -860,10 +894,16 @@ static void vm_paths(const char *name, char *sock, char *serial, char *pid,
     snprintf(pid, size, "%s/vm-%s.pid", VM_RUN_DIR, name);
 }
 
-/* vmcreate <name> <gb> <volume|->: allocate a raw disk image */
-static int do_vmcreate(const char *name, const char *gb, const char *volume)
+/* vmcreate <name> <gb> <volume|-> [base|-]: allocate a VM disk image.
+ * base == "-" → a plain raw image (empty disk, e.g. ISO-installed VMs).
+ * base == a filename under VM_IMAGES_DIR → a copy-on-write qcow2 overlay
+ * backed by that cached cloud image (app VMs; see plan §2.11). The overlay
+ * is tiny until written; <gb> sets the virtual size (grows the guest FS). */
+static int do_vmcreate(const char *name, const char *gb, const char *volume,
+                       const char *base)
 {
-    char path[512], dir[512], size_arg[32];
+    char path[512], dir[512], size_arg[32], backing[640];
+    struct stat st;
     char *p;
 
     if (!valid_uint(gb, 1, 4096))
@@ -883,9 +923,23 @@ static int do_vmcreate(const char *name, const char *gb, const char *volume)
         die("disk image already exists");
 
     snprintf(size_arg, sizeof(size_arg), "%sG", gb);
-    char *args[] = { "qemu-img", "create", "-f", "raw", path, size_arg, NULL };
-    if (run(QEMU_IMG_CMD, args) != 0)
-        die("qemu-img create failed");
+
+    if (base && strcmp(base, "-") != 0) {
+        if (!valid_basename(base))
+            die("invalid base image name");
+        snprintf(backing, sizeof(backing), "%s/%s", VM_IMAGES_DIR, base);
+        if (stat(backing, &st) != 0 || !S_ISREG(st.st_mode))
+            die("base image not found");
+        char *args[] = { "qemu-img", "create", "-f", "qcow2",
+            "-b", backing, "-F", "qcow2", path, size_arg, NULL };
+        if (run(QEMU_IMG_CMD, args) != 0)
+            die("qemu-img create (qcow2 overlay) failed");
+    } else {
+        char *args[] = { "qemu-img", "create", "-f", "raw",
+            path, size_arg, NULL };
+        if (run(QEMU_IMG_CMD, args) != 0)
+            die("qemu-img create failed");
+    }
     printf("%s\n", path);
     return 0;
 }
@@ -951,7 +1005,8 @@ static int do_vmstart(char *argv[])
     }
 
     snprintf(drivebuf, sizeof(drivebuf),
-        "file=%s,format=raw,if=virtio", image);
+        "file=%s,format=%s,if=virtio", image,
+        is_qcow2(image) ? "qcow2" : "raw");
     snprintf(netbuf, sizeof(netbuf),
         "tap,id=net0,ifname=%s,script=no,downscript=no", tap);
     if (strcmp(mac, "-") == 0)
@@ -1458,11 +1513,11 @@ int main(int argc, char *argv[])
         rc = do_ntp(argv[2]);
 
     } else if (strcmp(cmd, "vmcreate") == 0) {
-        if (argc != 5)
-            die("usage: flynas-helper vmcreate <name> <gb> <volume|->");
+        if (argc != 5 && argc != 6)
+            die("usage: flynas-helper vmcreate <name> <gb> <volume|-> [base|-]");
         if (!valid_name(argv[2]))
             die("invalid vm name");
-        rc = do_vmcreate(argv[2], argv[3], argv[4]);
+        rc = do_vmcreate(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : "-");
 
     } else if (strcmp(cmd, "vmstart") == 0) {
         if (argc != 9)
