@@ -862,8 +862,16 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    + browser-facing redirect; first Start → seed built/attached, flags flipped,
    secret nulled, rendered `ROOT_URL`/`--key`/`--auto-discover-url` all correct;
    delete sweeps everything.
-7. **Verify end-to-end (Forgejo). IN PROGRESS (h2dev 2026-07-01) — pipeline
-   proven, recipe last-mile tuning.** Brought up flynas0, installed + started
+7. **Verify end-to-end (Forgejo). DONE — full browser SSO round-trip green
+   (h2dev 2026-07-01).** The complete chain works in headless Chrome: Forgejo
+   "Sign in with flynas" → FlyNAS `/authorize` (session reuse) → code → Forgejo
+   token exchange at `http://10.77.0.1/api/oidc/token` over the bridge →
+   id_token validated → **signed into Forgejo as the FlyNAS user**
+   (`tools/uitest/test-app-sso.mjs` + `run-app-sso.sh`, two ssh -L tunnels: 443
+   for authorize, →guest:3000 for Forgejo). **Real bug this caught:** the token
+   endpoint only accepted `client_secret_post`, but Forgejo (and most clients)
+   use `client_secret_basic` — every exchange was failing `invalid_grant` (nil
+   client_id); fixed to parse the Basic header + advertise both. Getting here: Brought up flynas0, installed + started
    Forgejo, watched provisioning over serial. **Hit + fixed the hard blocker:**
    the stock Alpine image flakily kernel-panics under NVMM ("IO-APIC + timer
    doesn't work") — reliably at ≥2048MB, independent of smp/machine/acpi. Fix =
@@ -884,13 +892,18 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    (`user/oauth2/flynas`) — and because `add-oauth --auto-discover-url` had to
    **fetch discovery from `http://10.77.0.1/api/oidc` from inside the guest**,
    this proves Step 5's bridge issuer works with a real guest, not just a
-   simulated curl. **Only remaining:** the interactive browser SSO click, which
-   on h2dev's slirp needs two ssh -L tunnels (local→h2dev:443 for authorize,
-   local→h2dev→guest:3000 for Forgejo) + puppeteer.
-   **Bug noted (separate):** dnsmasq handed the guest a dynamic IP (.211) despite
-   a correct reservation for .101 — a SIGHUP/timing race in the reservation path;
-   worked around by retargeting the forward. Extend `tools/uitest/test-apps.mjs`
-   once green.
+   simulated curl. **Then the interactive browser round-trip closed it out**
+   (see the DONE note above — the `client_secret_basic` fix was the last bug).
+   **Follow-ups noted (not blockers):**
+   - **dnsmasq reservation race:** the guest got a dynamic IP despite a correct
+     reservation (SIGHUP/timing); worked around by retargeting the port-forward.
+     Fix so app-VM IPs are deterministic.
+   - **SameSite=Strict session cookie:** fine here (FlyNAS + app both `localhost`
+     = same site). In production with different hostnames the Strict cookie won't
+     ride the cross-site nav into `/authorize` → re-login each SSO; consider
+     `SameSite=Lax` for the session cookie.
+   - Forgejo reserves the username "admin" (test-data collision only; the
+     round-trip completed with a chosen username).
 8. **Generalize.** Once Forgejo is green, port the recipe pattern to the other 8
    (a compose/user-data body per template): Seafile, Jellyfin, VaultWarden, etc.
 
@@ -1081,8 +1094,15 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   (retry rode through a transient SQLite lock). add-oauth fetching discovery
   from inside the guest proves the bridge issuer end-to-end. Only the
   interactive browser SSO click remains (needs slirp tunnels + puppeteer).
-  Separate bug noted: dnsmasq gave a dynamic IP despite a correct reservation
-  (SIGHUP/timing race).
+- **2026-07-01 (later)**: Step 7 DONE — **full browser SSO round-trip green**.
+  Drove headless Chrome (two ssh -L tunnels) through Forgejo "Sign in with
+  flynas" → FlyNAS /authorize → token exchange over the bridge → signed into
+  Forgejo as the FlyNAS user. Caught + fixed a real bug: the token endpoint only
+  accepted `client_secret_post`, but Forgejo (and most clients) use
+  `client_secret_basic` — every exchange was failing. `tools/uitest/test-app-sso
+  .mjs` + `run-app-sso.sh` added. §2.11 steps 1-7 complete; only step 8
+  (generalize to the other 8 apps) remains. Follow-ups: dnsmasq reservation
+  race, SameSite=Strict cookie for cross-host production SSO.
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button
