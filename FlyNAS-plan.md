@@ -876,9 +876,17 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    publishing was unreachable externally — minimal Alpine lacks `iptables`
    (added); (b) `add-oauth` hit SQLite "database is locked" vs the running
    server — added `FORGEJO__database__SQLITE_TIMEOUT` + an idempotent retry.
-   **Still to confirm:** Forgejo reachable via the port-forward + OIDC source
-   registered, then the browser SSO round-trip (needs slirp tunnels on h2dev:
-   outer-QEMU port → h2dev:20001, plus the existing 443 tunnel).
+   **Both fixes CONFIRMED (re-run 2026-07-01):** Forgejo home `200` +
+   `<title>Forgejo…</title>` (iptables fix ✓, external reachability just needed
+   Forgejo's ~2min init), and `OIDC registration: ok` after the retry rode
+   through one transient "database is locked" (SQLITE_TIMEOUT+retry ✓). The
+   **"Sign in with flynas"** button is live on Forgejo's `/user/login`
+   (`user/oauth2/flynas`) — and because `add-oauth --auto-discover-url` had to
+   **fetch discovery from `http://10.77.0.1/api/oidc` from inside the guest**,
+   this proves Step 5's bridge issuer works with a real guest, not just a
+   simulated curl. **Only remaining:** the interactive browser SSO click, which
+   on h2dev's slirp needs two ssh -L tunnels (local→h2dev:443 for authorize,
+   local→h2dev→guest:3000 for Forgejo) + puppeteer.
    **Bug noted (separate):** dnsmasq handed the guest a dynamic IP (.211) despite
    a correct reservation for .101 — a SIGHUP/timing race in the reservation path;
    worked around by retargeting the forward. Extend `tools/uitest/test-apps.mjs`
@@ -1068,10 +1076,13 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   Whole provisioning pipeline then ran end to end on h2dev: install → qcow2
   overlay → seed → boot → cloud-init → Docker (cgroups fix) → Forgejo container
   pulled+started → healthcheck passed → OIDC registration attempted. Two
-  last-mile recipe fixes applied (Alpine needs `iptables` for Docker `-p`;
-  add-oauth SQLite lock → SQLITE_TIMEOUT + retry); confirming re-run + browser
-  SSO round-trip pending. Separate bug noted: dnsmasq gave a dynamic IP despite
-  a correct .101 reservation (SIGHUP/timing race).
+  last-mile recipe fixes applied + CONFIRMED on the re-run: Forgejo home 200 +
+  "Sign in with flynas" button live on /user/login, `OIDC registration: ok`
+  (retry rode through a transient SQLite lock). add-oauth fetching discovery
+  from inside the guest proves the bridge issuer end-to-end. Only the
+  interactive browser SSO click remains (needs slirp tunnels + puppeteer).
+  Separate bug noted: dnsmasq gave a dynamic IP despite a correct reservation
+  (SIGHUP/timing race).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button
