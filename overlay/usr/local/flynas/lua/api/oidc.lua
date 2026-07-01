@@ -16,6 +16,13 @@ local DB_PATH = "/usr/local/flynas/flynas.db"
 local CODE_TTL = 60        -- seconds an auth code is valid
 local TOKEN_TTL = 3600     -- id/access token lifetime
 
+-- Guest-facing issuer for installed app VMs: they reach FlyNAS over the
+-- flynas0 NAT bridge (10.77.0.1, plain http — there's no cert for a guest to
+-- trust). install stashes this and the app's recipe injects it as the app's
+-- configured issuer, so it equals the request-relative issuer() the app sees
+-- when it fetches discovery/token over the bridge. §2.11 #5.
+local BRIDGE_ISSUER = "http://10.77.0.1/api/oidc"
+
 local _M = {}
 
 local function open_db()
@@ -35,8 +42,28 @@ local function rand_hex(n)
     return table.concat(h)
 end
 
+-- Issuer/base URL derived from the request, so it's correct for whichever
+-- host+scheme the client reached us on: https on the management port for a
+-- browser, http on the 10.77.0.1 bridge for an app VM's server-to-server
+-- calls (discovery/token/jwks/userinfo). The id_token `iss` and the discovery
+-- `issuer` therefore always match what the client actually fetched. §2.11 #5.
 local function issuer()
-    return "https://" .. (ngx.var.http_host or "localhost") .. "/api/oidc"
+    local scheme = ngx.var.scheme or "https"
+    return scheme .. "://" .. (ngx.var.http_host or "localhost") .. "/api/oidc"
+end
+
+-- Browser-facing base for the authorize endpoint. Apps redirect the user's
+-- browser there, so it must be LAN-reachable — not the 10.77.0.1 bridge that
+-- carries the app's own server-to-server calls. Admins set `external_url`
+-- (e.g. https://nas.example.com) in config; unset ⇒ fall back to the
+-- request-relative issuer (correct in dev where browser and app share a host).
+local function authorize_base(conn)
+    local row = conn:query_one(
+        "SELECT value FROM config WHERE key = 'external_url'")
+    if row and row.value and #row.value > 0 then
+        return (row.value:gsub("/+$", "")) .. "/api/oidc"
+    end
+    return issuer()
 end
 
 -- The active user for the current session cookie, or nil (no response).
@@ -95,10 +122,15 @@ end
 
 -- GET /api/oidc/.well-known/openid-configuration
 function _M.discovery()
+    local conn = open_db()
+    -- issuer/token/jwks/userinfo are request-relative (bridge when an app
+    -- fetches them over 10.77.0.1); only authorize is browser-facing. §2.11 #5.
     local iss = issuer()
+    local authz = authorize_base(conn) .. "/authorize"
+    conn:close()
     json.response({
         issuer = iss,
-        authorization_endpoint = iss .. "/authorize",
+        authorization_endpoint = authz,
         token_endpoint = iss .. "/token",
         userinfo_endpoint = iss .. "/userinfo",
         jwks_uri = iss .. "/jwks",
@@ -388,7 +420,10 @@ function _M.provision_for_vm(conn, vm, tpl)
     local redirect_uri = base .. tpl.oidc_redirect_path
     local rec, err = mint_client(conn, vm.name .. "-sso", { redirect_uri }, vm.id)
     if not rec then return nil, err end
-    local iss = issuer()
+    -- Stash the *bridge* issuer, not issuer() — install runs in the admin's
+    -- https request, but the value we bake into the guest must be the URL the
+    -- guest itself can reach (10.77.0.1 over http). §2.11 #5.
+    local iss = BRIDGE_ISSUER
     conn:query(
         "INSERT OR REPLACE INTO app_provisioning " ..
         "(vm_id, oidc_client_id, oidc_secret, redirect_uri, issuer, delivered) " ..

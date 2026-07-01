@@ -815,12 +815,28 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
    restart. The **seed-build wiring** (render → `vm_seed` → `delivered=1`, NULL
    secret) lands in step 6 (first Start), the **live Forgejo boot + OIDC CLI
    tuning** in step 7.
-5. **Issuer reachability (the TLS wrinkle). DECIDED: plain HTTP on the bridge.**
-   Guest hits the issuer at `10.77.0.1` over the NAT bridge; `https://<host>`
-   cert won't match. First slice exposes OIDC over **plain HTTP bound to
-   `10.77.0.1`**, and the discovery `issuer` is that guest-facing URL. (CA-trust
-   via cloud-init deferred; the bridge is host-internal NAT so HTTP there is not
-   LAN-exposed.)
+5. **Issuer reachability (the TLS wrinkle). DONE (verified h2dev 2026-06-30).**
+   Split-horizon, since an installed app is reached two ways: the user's
+   **browser** (LAN) and the app's own **server-to-server** OIDC calls (the
+   10.77.0.1 bridge). Solution:
+   - nginx serves `/api/oidc/` over **plain http on :80** (no 301) so a guest
+     reaches discovery/token/jwks/userinfo at `http://10.77.0.1/api/oidc/*`
+     (no cert to trust); everything else on :80 still redirects to https.
+   - `issuer()` is now **request-relative** (scheme+Host): a guest fetching over
+     the bridge sees `http://10.77.0.1/api/oidc` for issuer *and* the `iss`
+     claim `/token` emits — self-consistent by construction; a browser on 443
+     still sees the https issuer.
+   - `discovery()` splits only `authorization_endpoint` out to a browser-facing
+     base: a new `config.external_url` (e.g. `https://nas.example.com`) →
+     `<external_url>/api/oidc/authorize`; unset ⇒ request-relative fallback (dev).
+   - install stashes `BRIDGE_ISSUER` (`http://10.77.0.1/api/oidc`) — the value
+     the guest can reach — not the admin's https request host.
+   Verified: guest-sim (Host 10.77.0.1 on :80) discovery/jwks all bridge-http +
+   200 (no redirect); non-oidc :80 still 301s; 443 gives https issuer;
+   `external_url` set ⇒ authorize→external, token/issuer stay bridge.
+   **Known gap for step 6:** the stashed `redirect_uri` (and Forgejo `ROOT_URL`)
+   still use the guest IP:port; for real browser SSO they must be the
+   external_url + the app's **port-forward** — wire that with step 6.
 6. **Wire install orchestration. DECIDED: stage-and-provision-on-first-Start.**
    `apps.install` mints the OIDC client, stashes provisioning, and stages the
    seed spec — but does **not** boot the VM. The seed is rendered + built and the
@@ -994,8 +1010,16 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
   `util/cloudinit.render` (`{{KEY}}` fill, errors on unresolved) +
   `apps.render_user_data` (vars from VM + OIDC stash). Verified: luajit render
   test (placeholders map, guard fires) + recipe loads into live DB, require
-  chain resolves. Next: Step 5 (issuer over plain HTTP on the `10.77.0.1`
-  bridge — the stashed `issuer` is still the public HTTPS host).
+  chain resolves. **Step 5 DONE + verified:** OIDC bridge reachability —
+  nginx serves `/api/oidc/` over plain http on :80 (guest-facing, no 301);
+  `issuer()` request-relative (scheme+Host) so a guest over 10.77.0.1 gets a
+  self-consistent `iss`; `discovery()` splits `authorization_endpoint` to a
+  browser-facing `config.external_url` (fallback request-relative); install
+  stashes `BRIDGE_ISSUER`. Verified guest-sim discovery/jwks over :80, the
+  external_url split, 443 unaffected. Known gap: stashed `redirect_uri` /
+  Forgejo `ROOT_URL` still guest-IP-based — fix in step 6 with external_url +
+  port-forward. Next: Step 6 (first-Start orchestration: render → vm_seed →
+  start → delivered=1/NULL secret; wire base image + qcow2 into install).
 - **2026-06-15**: Serial console. `GET /api/vms/:id/console` upgrades to a
   WebSocket (`resty.websocket.server`) and bridges it to the VM's serial
   unix socket with two `ngx.thread` cosocket pumps; UI "Console" button
