@@ -150,7 +150,7 @@ function _M.discovery()
         subject_types_supported = { "public" },
         id_token_signing_alg_values_supported = { "RS256" },
         scopes_supported = { "openid", "profile", "email", "groups" },
-        token_endpoint_auth_methods_supported = { "client_secret_post" },
+        token_endpoint_auth_methods_supported = { "client_secret_basic", "client_secret_post" },
         code_challenge_methods_supported = { "S256", "plain" },
     })
 end
@@ -255,6 +255,24 @@ end
 function _M.token()
     ngx.req.read_body()
     local f = ngx.req.get_post_args()
+
+    -- Client authentication: accept client_secret_basic (Authorization: Basic
+    -- <b64(client_id:client_secret)>) as well as client_secret_post (creds in
+    -- the body). Basic is the OIDC default and what Forgejo (and most clients)
+    -- send, so we must read it or every token exchange fails. §2.11 #7.
+    local cid, csecret = f.client_id, f.client_secret
+    local auth = ngx.var.http_authorization
+    if auth then
+        local b64 = auth:match("^%s*[Bb]asic%s+(%S+)")
+        local dec = b64 and ngx.decode_base64(b64)
+        if dec then
+            local u, p = dec:match("^([^:]*):(.*)$")
+            -- Per RFC 6749 §2.3.1 the two are form-urlencoded before base64.
+            if u and u ~= "" then cid = cid or ngx.unescape_uri(u) end
+            if p then csecret = csecret or ngx.unescape_uri(p) end
+        end
+    end
+
     if f.grant_type ~= "authorization_code" then
         json.response({ error = "unsupported_grant_type" }, 400)
         return
@@ -272,7 +290,7 @@ function _M.token()
     -- One-time use.
     conn:query("DELETE FROM oidc_codes WHERE code = ?", f.code)
 
-    if f.client_id ~= row.client_id or f.redirect_uri ~= row.redirect_uri then
+    if cid ~= row.client_id or f.redirect_uri ~= row.redirect_uri then
         conn:close()
         json.response({ error = "invalid_grant" }, 400)
         return
@@ -281,8 +299,8 @@ function _M.token()
     local client = conn:query_one(
         "SELECT client_secret_hash FROM oidc_clients WHERE client_id = ?",
         row.client_id)
-    if not client or not f.client_secret
-        or not argon2.verify(client.client_secret_hash, f.client_secret) then
+    if not client or not csecret
+        or not argon2.verify(client.client_secret_hash, csecret) then
         conn:close()
         json.response({ error = "invalid_client" }, 401)
         return
