@@ -769,6 +769,7 @@ static int do_ntp(const char *server)
 #define VM_SYS_DIR "/usr/local/flynas/vms"
 #define VM_IMAGES_DIR "/usr/local/flynas/images"   /* cached base cloud images */
 #define VM_SEED_DIR "/usr/local/flynas/seeds"       /* per-VM NoCloud cidata seeds (root 0700) */
+#define VM_LOG_DIR "/var/log/flynas"                 /* per-VM guest serial console logs */
 #define MAX_USERDATA 65536
 #define VM_BRIDGE "flynas0"
 
@@ -1053,7 +1054,7 @@ static int do_vmstart(char *argv[])
     const char *image = argv[5], *tap = argv[6], *mac = argv[7], *iso = argv[8];
     char sock[256], serial[256], pid[256];
     char drivebuf[600], netbuf[128], devbuf[128];
-    char qmpbuf[300], serbuf[300];
+    char qmpbuf[300], serbuf[700], conlog[300];
     char seedpath[600], seeddrivebuf[640];
     int have_seed;
     struct stat st;
@@ -1122,7 +1123,16 @@ static int do_vmstart(char *argv[])
     else
         snprintf(devbuf, sizeof(devbuf), "virtio-net-pci,netdev=net0,mac=%s", mac);
     snprintf(qmpbuf, sizeof(qmpbuf), "unix:%s,server,nowait", sock);
-    snprintf(serbuf, sizeof(serbuf), "unix:%s,server,nowait", serial);
+    /* Serial is a socket chardev (unchanged socket path — the WebSocket
+     * console in vms.lua still connects to <serial>) that ALSO tees the
+     * guest's console to a persistent logfile, so cloud-init / provisioning
+     * output survives when nobody is attached. logappend keeps first-boot
+     * output across a later stop/start. */
+    mkdir(VM_LOG_DIR, 0750);
+    snprintf(conlog, sizeof(conlog), "%s/vm-%s.log", VM_LOG_DIR, name);
+    snprintf(serbuf, sizeof(serbuf),
+        "socket,id=console0,path=%s,server=on,wait=off,logfile=%s,logappend=on",
+        serial, conlog);
 
     char *a[40];
     int n = 0;
@@ -1143,7 +1153,8 @@ static int do_vmstart(char *argv[])
         a[n++] = "-boot"; a[n++] = "d";
     }
     a[n++] = "-qmp"; a[n++] = qmpbuf;
-    a[n++] = "-serial"; a[n++] = serbuf;
+    a[n++] = "-chardev"; a[n++] = serbuf;
+    a[n++] = "-serial"; a[n++] = "chardev:console0";
     a[n++] = "-vga"; a[n++] = "none";
     a[n++] = "-display"; a[n++] = "none";
     a[n++] = "-daemonize"; a[n++] = "-pidfile"; a[n++] = pid;
@@ -1213,6 +1224,10 @@ static int do_vmdelete(const char *name, const char *volume)
     if (access(path, F_OK) == 0 && unlink(path) != 0)
         die("failed to remove disk image");
     vmseed_cleanup(name);
+    /* Sweep the persistent console log (kept across stop/start, but the VM
+     * is gone now). Reuse path[] — the disk image is already unlinked. */
+    snprintf(path, sizeof(path), "%s/vm-%s.log", VM_LOG_DIR, name);
+    unlink(path);
     return 0;
 }
 
