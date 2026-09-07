@@ -109,8 +109,10 @@ end
 -- that pre-date this column). The path is appended to the guest's base URL
 -- to form the registered redirect_uri at install time.
 local OIDC_REDIRECTS = {
-    Seafile = "/oauth/callback",                 -- Seafile OAuth client
-    Forgejo = "/user/oauth2/flynas/callback",    -- Forgejo OAuth2 source named "flynas"
+    Seafile     = "/oauth/callback",              -- Seafile OAuth client
+    Forgejo     = "/user/oauth2/flynas/callback", -- Forgejo OAuth2 source named "flynas"
+    -- VaultWarden builds this path itself from $DOMAIN; it is not configurable.
+    VaultWarden = "/identity/connect/oidc-signin",
 }
 for name, path in pairs(OIDC_REDIRECTS) do
     conn:query(
@@ -127,7 +129,8 @@ end
 migrate_column("app_templates", "cloud_init", "TEXT")
 local RECIPE_DIR = "/usr/local/flynas/lua/recipes"
 local RECIPES = {
-    Forgejo = "forgejo",
+    Forgejo     = "forgejo",
+    VaultWarden = "vaultwarden",
 }
 for name, file in pairs(RECIPES) do
     local fh = io.open(RECIPE_DIR .. "/" .. file .. ".yaml", "r")
@@ -138,6 +141,40 @@ for name, file in pairs(RECIPES) do
             conn:query("UPDATE app_templates SET cloud_init = ? WHERE name = ?",
                 body, name)
         end
+    end
+end
+
+-- One-time repair: mac_address used to come from three unseeded math.random
+-- bytes, so every nginx worker produced the same sequence and every VM got the
+-- SAME MAC. With a single app VM that is invisible; the second one puts a
+-- duplicate reservation in the dnsmasq hostsfile and the two guests fight over
+-- a lease, which defeats the whole point of reserving addresses. Rewrite any
+-- duplicated or missing MAC to the id-derived value util/vmnet now assigns.
+-- Rows already unique are left alone, so a running guest's NIC does not change
+-- underneath it.
+conn:exec([[
+    UPDATE vms
+       SET mac_address = printf('52:54:00:%02x:%02x:%02x',
+               (id / 65536) % 256, (id / 256) % 256, id % 256)
+     WHERE mac_address IS NULL
+        OR mac_address IN (
+               SELECT mac_address FROM vms
+                WHERE mac_address IS NOT NULL
+                GROUP BY mac_address HAVING COUNT(*) > 1)
+]])
+
+-- ...and push the corrected reservations out, or the hostsfile keeps the
+-- duplicates until someone happens to create or delete a VM. Only when the
+-- UPDATE above actually touched a row: sync_dhcp shells out to the setuid
+-- helper, which is not something to do on every master start for nothing.
+-- A guest that is already running keeps its old NIC until it is restarted.
+do
+    local changed = conn:query_one("SELECT changes() AS n")
+    if changed and tonumber(changed.n) and tonumber(changed.n) > 0 then
+        ngx.log(ngx.WARN, "repaired ", changed.n,
+            " duplicate/missing VM MAC(s); resyncing DHCP reservations. ",
+            "Restart any running app VM to pick up its new MAC.")
+        require("util.vmnet").sync_dhcp(conn)
     end
 end
 

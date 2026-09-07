@@ -21,6 +21,19 @@ function _M.vm_ip(id)
     return "10.77.0." .. (100 + id)
 end
 
+-- Deterministic per-VM MAC, in QEMU's assigned 52:54:00 prefix.
+--
+-- Derived from the row id for the same reason vm_ip is, and for one more:
+-- this used to be three math.random() bytes with no math.randomseed, so every
+-- nginx worker produced the SAME sequence and every VM got the SAME MAC. With
+-- one app VM that is invisible; the second one lands a duplicate reservation
+-- in the dnsmasq hostsfile and the two guests fight over a lease. An id-derived
+-- MAC cannot collide, and it survives a worker restart.
+function _M.vm_mac(id)
+    return string.format("52:54:00:%02x:%02x:%02x",
+        math.floor(id / 65536) % 256, math.floor(id / 256) % 256, id % 256)
+end
+
 -- Rewrite dnsmasq's reservation file from current VMs, then SIGHUP.
 function _M.sync_dhcp(conn)
     local vms = conn:query(

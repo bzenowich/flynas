@@ -904,8 +904,9 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
      `SameSite=Lax` for the session cookie.
    - Forgejo reserves the username "admin" (test-data collision only; the
      round-trip completed with a chosen username).
-8. **Generalize.** Once Forgejo is green, port the recipe pattern to the other 8
-   (a compose/user-data body per template): Seafile, Jellyfin, VaultWarden, etc.
+8. **Generalize.** Port the recipe pattern to the other apps (a compose/
+   user-data body per template). **VaultWarden DONE (2026-09-07)** — 2 of 9.
+   Remaining: Seafile, Jellyfin, Readeck, DokuWiki, Wekan, CryptPad, RoundCube.
 
 **Open decisions — all resolved (2026-06-30):**
 - ~~Auto-start on install vs. provision-on-first-Start~~ → **first-Start** (Step 6).
@@ -1039,6 +1040,55 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
 5. **Privilege separation**: nginx runs `user www flynas`; DB is 664 www:flynas and `/usr/local/flynas` must stay www-writable for SQLite WAL files (deploy with `tar -xof`, see memory notes).
 
 ## Progress Log
+
+- **2026-09-07 (later)**: **VaultWarden recipe — §2.11 step 8, 2 of 9.**
+  `lua/recipes/vaultwarden.yaml` + `OIDC_REDIRECTS`/`RECIPES` entries. Verified
+  on h2dev: provisions clean, `/alive` 200, and SSO live —
+  `/identity/sso/prevalidate` mints a token, which `identity.rs:1178` only does
+  when `CONFIG.sso_enabled()` holds. Image pinned `1.37.2` (Forgejo pins `:11`).
+  Simpler than Forgejo, as predicted: SSO is pure environment, so no post-start
+  CLI step and none of the SQLite-lock retrying.
+
+  Porting the pattern to a second app is what found the rest of this:
+
+  - **Every VM was getting the SAME MAC.** `gen_mac()` used three
+    `math.random()` bytes with no `math.randomseed`, so each nginx worker
+    produced an identical sequence — invisible with one app VM, but the second
+    put a *duplicate reservation* in the dnsmasq hostsfile, defeating the
+    reservations fix made earlier the same day. MACs now derive from the row id
+    (`vmnet.vm_mac`, mirroring `vm_ip`); the duplicate `gen_mac` in both
+    `vms.lua` and `apps.lua` is gone. An idempotent migration repairs existing
+    rows and re-syncs the hostsfile — without that a repaired install keeps the
+    stale duplicates until someone happens to touch a VM. Tested by putting the
+    box back into the broken state and restarting.
+
+    **Known gap in that repair:** rewriting the MAC of a VM that is *running*
+    strands it. dnsmasq still holds the old MAC's 12h lease on the reserved
+    address, so the guest comes back on its new MAC, finds the address taken
+    and gets nothing — observed on forge1. Recovering means pruning leases
+    whose MAC is no longer in the hostsfile and restarting dnsmasq (SIGHUP
+    does not reload leases), then restarting the VM. The migration should do
+    that pruning itself; it does not yet. Only bites installs that predate the
+    id-derived MAC, and only for VMs running at the moment of the upgrade.
+  - **VaultWarden needs an email; FlyNAS does not reliably have one.**
+    `oidc.lua:119` emits the `email` claim only when the user *has* an email,
+    and `/api/setup` creates the admin with none. Forgejo tolerates that;
+    VaultWarden cannot, since Bitwarden accounts are email-keyed. Worse,
+    `PUT /api/users/:id/email` sets `email_verified=0` and mails a code that
+    goes nowhere (`"SMTP not configured"`), and VaultWarden refuses accounts the
+    IdP has not marked verified. The recipe therefore sets
+    `SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION=true`. **That is a real relaxation** —
+    an account keyed to an address nobody proved — and the better fix is
+    working SMTP plus a verified address, at which point the flag comes off.
+    Worth deciding before the remaining SSO apps inherit the same workaround.
+  - **`/api/config` is a trap for asserting SSO state.** Its `environment.sso`
+    field is hardcoded to `""` in vaultwarden 1.37.2
+    (`src/api/core/mod.rs:248`), so it reads as "SSO off" on a working install
+    and cost a wrong diagnosis and two rebuilds here. `/identity/sso/prevalidate`
+    is the honest probe; the recipe asserts on it and says why in a comment.
+    Relatedly, a bare GET of `/identity/connect/oidc-signin` 404s by design —
+    the route is declared with required query params — so route probing proves
+    nothing either.
 
 - **2026-09-07**: Step-7 follow-ups closed and the **fresh-install path proven
   end to end** on a pristine guest (overlay reset from the locked base).

@@ -15,8 +15,12 @@ verified in a real browser. The pattern works; now scale it.
 Port the Forgejo pattern to the other 8 apps. Suggested order by
 payoff/difficulty:
 
-- **VaultWarden** — single container, OIDC-only; simplest next validation of
-  the pattern.
+- ~~**VaultWarden**~~ — **DONE (2026-09-07).** `lua/recipes/vaultwarden.yaml`,
+  redirect `/identity/connect/oidc-signin`, image pinned `1.37.2`. Provisions
+  clean and SSO is live (`/identity/sso/prevalidate` mints a token). Simpler
+  than Forgejo as predicted: SSO is pure environment, so there is no post-start
+  CLI step and none of the SQLite-lock retrying. Two things it forced, both
+  beyond the recipe itself — see the log entry for 2026-09-07.
 - **Seafile** — flagship app (file sharing = NAS core value); multi-container
   (server + db), stress-tests the recipe pattern with compose. Also unblocks
   §4.3 group sync and `/api/restore/share`.

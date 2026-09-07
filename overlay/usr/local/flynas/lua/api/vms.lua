@@ -38,11 +38,6 @@ local function live_status(vm)
     return st
 end
 
-local function gen_mac()
-    return string.format("52:54:00:%02x:%02x:%02x",
-        math.random(0, 255), math.random(0, 255), math.random(0, 255))
-end
-
 local function valid_name(s)
     return s and s:match("^[a-z_][a-z0-9_%-]*$") and #s <= 32
 end
@@ -107,11 +102,10 @@ function _M.create(body)
         return
     end
 
-    local mac = gen_mac()
     local rows, db_err = conn:query(
         "INSERT INTO vms (name, cpus, ram_mb, disk_gb, volume, iso_path, " ..
-        "mac_address, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'stopped') RETURNING *",
-        body.name, cpus, ram, disk, volume, body.iso_path, mac)
+        "status) VALUES (?, ?, ?, ?, ?, ?, 'stopped') RETURNING *",
+        body.name, cpus, ram, disk, volume, body.iso_path)
     if not rows then
         conn:close()
         ngx.log(ngx.ERR, "vm insert failed: ", db_err)
@@ -119,10 +113,14 @@ function _M.create(body)
         return
     end
     local vm = rows[1]
-    -- Reserve a bridge IP so DHCP hands the guest a known address.
+    -- Reserve a bridge IP and MAC so DHCP hands the guest a known address.
+    -- Both derive from the row id, which only exists after the insert.
     local ip = vmnet.vm_ip(vm.id)
-    conn:query("UPDATE vms SET ip_address = ? WHERE id = ?", ip, vm.id)
+    local mac = vmnet.vm_mac(vm.id)
+    conn:query("UPDATE vms SET ip_address = ?, mac_address = ? WHERE id = ?",
+        ip, mac, vm.id)
     vm.ip_address = ip
+    vm.mac_address = mac
     vmnet.sync_dhcp(conn)
     conn:close()
     vm.status = "stopped"

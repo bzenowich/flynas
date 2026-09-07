@@ -1,0 +1,119 @@
+#cloud-config
+# FlyNAS app recipe: VaultWarden (single container, SQLite) with FlyNAS SSO.
+# Double-brace placeholders are filled by util/cloudinit.render at first Start;
+# the once-only OIDC secret rides in this seed (root 0600) into the guest.
+#
+# Simpler than the Forgejo recipe in one important way: there is no post-start
+# CLI registration step. VaultWarden reads its whole SSO config from the
+# environment, so there is no second process opening the same SQLite file and
+# none of the "database is locked" retry dance Forgejo needed.
+write_files:
+  - path: /root/provision-app.sh
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      # Provision VaultWarden with the FlyNAS OIDC provider as its SSO source.
+      # All output goes to the serial console (this image's /dev/console is the
+      # framebuffer, not ttyS0 — write ttyS0 explicitly).
+      set -eu
+      log() { echo "===FLYNAS-APP: $*" > /dev/ttyS0; }
+
+      log "installing docker"
+      # iptables is required for Docker's -p port publishing (DNAT); minimal
+      # Alpine doesn't pull it in, so the published port is silently
+      # unreachable from outside the guest without it.
+      apk add --no-cache docker docker-cli-compose iptables ip6tables
+
+      log "starting cgroups + docker"
+      rc-update add cgroups boot
+      rc-service cgroups start
+      rc-update add docker boot
+      rc-service docker start
+      i=0; while [ $i -lt 30 ]; do docker info >/dev/null 2>&1 && break; i=$((i+1)); sleep 2; done
+
+      # DOMAIN is the browser-facing base with no trailing slash. VaultWarden
+      # builds its own SSO callback as $DOMAIN/identity/connect/oidc-signin,
+      # which must match the redirect_uri FlyNAS registered — that URI is
+      # exactly ROOT_URL + the template's oidc_redirect_path, so deriving
+      # DOMAIN from ROOT_URL keeps the two in lockstep.
+      DOMAIN=$(echo '{{ROOT_URL}}' | sed 's:/*$::')
+      log "domain=$DOMAIN"
+
+      log "starting vaultwarden container"
+      # SSO_AUTHORITY must be the base that serves
+      # $SSO_AUTHORITY/.well-known/openid-configuration — the same discovery
+      # URL Forgejo auto-discovers, reached over the guest bridge.
+      # SIGNUPS_ALLOWED lets a first-time SSO user be created; without it the
+      # round-trip authenticates and then refuses to make an account.
+      #
+      # SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION is needed because VaultWarden
+      # keys accounts by email and refuses one the IdP has not marked
+      # verified — and FlyNAS marks nothing verified: PUT /api/users/:id/email
+      # sets email_verified=0 and mails a code, which goes nowhere until SMTP
+      # is configured. Unlike Forgejo, which will take a user with no email at
+      # all, VaultWarden cannot work without this today. Turn it off once
+      # FlyNAS can actually verify an address; the risk it carries is an
+      # account keyed to an address nobody proved belongs to that user, which
+      # matters on a multi-user NAS.
+      docker run -d --name {{APP_NAME}} --restart always \
+        -p {{APP_PORT}}:80 \
+        -v /var/lib/{{APP_NAME}}:/data \
+        -e DOMAIN="$DOMAIN" \
+        -e SIGNUPS_ALLOWED=true \
+        -e SSO_ENABLED=true \
+        -e SSO_ONLY=false \
+        -e SSO_AUTHORITY='{{ISSUER}}' \
+        -e SSO_CLIENT_ID='{{CLIENT_ID}}' \
+        -e SSO_CLIENT_SECRET='{{CLIENT_SECRET}}' \
+        -e SSO_SCOPES='email profile' \
+        -e SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION=true \
+        vaultwarden/server:1.37.2
+
+      log "waiting for vaultwarden http"
+      # /alive is the template's monitor_path and is unauthenticated.
+      ok=fail
+      i=0; while [ $i -lt 60 ]; do
+        if wget -qO- http://127.0.0.1:{{APP_PORT}}/alive >/dev/null 2>&1; then ok=ok; break; fi
+        i=$((i+1)); sleep 2
+      done
+      log "vaultwarden http: $ok"
+
+      # Pinned deliberately, the way the Forgejo recipe pins :11 — an app that
+      # silently jumps a major version underneath a NAS appliance is not a
+      # feature. Logged too, so a mismatch is visible in the console log.
+      log "vaultwarden version: $(docker exec {{APP_NAME}} /vaultwarden --version 2>/dev/null || echo unknown)"
+
+      log "checking SSO wiring"
+      # VaultWarden fetches discovery lazily on the first SSO click, so a
+      # successful start does not by itself prove the authority is reachable.
+      # Fetch it here from inside the guest, which is the same path the
+      # container will take, and say so plainly either way.
+      if wget -qO- '{{ISSUER}}/.well-known/openid-configuration' >/dev/null 2>&1; then
+        log "OIDC discovery: ok"
+      else
+        log "OIDC discovery: FAILED (authority unreachable from guest)"
+      fi
+
+      # A container that is merely "up" proves nothing about the SSO wiring, so
+      # assert on it. /identity/sso/prevalidate is the honest probe: it mints a
+      # token when CONFIG.sso_enabled() holds and errors otherwise.
+      #
+      # Do NOT use /api/config for this. Its environment.sso field looks like
+      # the answer and is not — vaultwarden 1.37.2 hardcodes it to "" (see
+      # src/api/core/mod.rs), so it reads as "SSO off" on a perfectly working
+      # install.
+      if wget -qO- http://127.0.0.1:{{APP_PORT}}/identity/sso/prevalidate 2>/dev/null \
+         | grep -q '"token"'; then
+        log "SSO: ENABLED (prevalidate issued a token)"
+      else
+        log "SSO: DISABLED — prevalidate refused to issue a token"
+        log "--- vaultwarden env (SSO_*, secret masked) ---"
+        docker exec {{APP_NAME}} env 2>/dev/null \
+          | grep '^SSO' | sed 's/\(SECRET=\).*/\1<masked>/' > /dev/ttyS0 || true
+        log "--- vaultwarden log, last 40 lines ---"
+        docker logs {{APP_NAME}} 2>&1 | tail -40 > /dev/ttyS0 || true
+      fi
+
+      log "provisioning DONE"
+runcmd:
+  - [ sh, -c, "/root/provision-app.sh > /dev/ttyS0 2>&1 || echo '===FLYNAS-APP: provision-app.sh errored' > /dev/ttyS0" ]
