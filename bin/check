@@ -16,7 +16,7 @@ n=0
 
 for f in $(find "$OVERLAY" -name '*.lua' | sort); do
     n=$((n + 1))
-    if ! ssh "$VM" "$LUACHK" < "$f" >/dev/null 2>"$tmp"; then
+    if ! vssh "$LUACHK" < "$f" >/dev/null 2>"$tmp"; then
         echo "LUA SYNTAX ERROR: ${f#"$OVERLAY"/}"
         sed 's/^/    /' "$tmp"
         fail=1

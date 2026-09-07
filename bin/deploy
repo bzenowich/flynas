@@ -33,16 +33,17 @@ fi
 # `/`, which would make rsync rewrite the attributes of /usr and /usr/local.
 # No --delete: runtime dirs on the VM (bin/, seeds/, ssl/, images/) persist.
 # Runtime state (DB, WAL, ssl/, logs/) is excluded.
-echo "==> rsync overlay/usr/local/flynas -> $VM"
-rsync -a \
+echo "==> rsync overlay/usr/local/flynas -> $VM_TARGET"
+rsync -a -e "$VM_RSYNC_RSH" \
     --exclude 'flynas.db' \
     --exclude 'flynas.db-shm' \
     --exclude 'flynas.db-wal' \
     --exclude 'ssl/' \
     --exclude 'logs/' \
-    "$OVERLAY"/usr/local/flynas/ "$VM":/usr/local/flynas/
+    "$OVERLAY"/usr/local/flynas/ "$VM_TARGET":/usr/local/flynas/
 echo "==> rsync rc.d/flynas"
-rsync -a "$OVERLAY"/usr/local/etc/rc.d/flynas "$VM":/usr/local/etc/rc.d/flynas
+rsync -a -e "$VM_RSYNC_RSH" \
+    "$OVERLAY"/usr/local/etc/rc.d/flynas "$VM_TARGET":/usr/local/etc/rc.d/flynas
 
 # Permissions. There is no `flynas` USER on the box — only the group (gid
 # flynas); nginx runs `www`, which is a member. www needs group-write on the

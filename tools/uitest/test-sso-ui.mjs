@@ -7,10 +7,11 @@
 //   5. untick → grant removed
 //
 // Seed/cleanup (client `sso-ui-client` + user `ssouitestuser`) is done by
-// run-sso-ui.sh over ssh.
+// run-sso-ui.sh over ssh; run this test through that script (or run-all.sh),
+// which also exports FLYNAS_SSH for the DB checks below.
 import puppeteer from 'puppeteer-core';
 import { createHmac } from 'crypto';
-import { execFileSync } from 'child_process';
+import { execSync } from 'child_process';
 
 const SECRET = process.env.TOTP_SECRET;
 const BASE = 'https://localhost:8443';
@@ -40,9 +41,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function dbRole() {
     const sql = "SELECT ag.role FROM app_grants ag JOIN users u ON u.id=ag.user_id " +
         `WHERE u.username='${TARGET}';`;
-    // Pipe to `ssh h2dev sh` stdin — the remote login shell is tcsh and
-    // re-parses inline args, breaking on the SQL's spaces/quotes.
-    return execFileSync('ssh', ['h2dev', 'sh'],
+    // Pipe to `sh` on the VM over its stdin — the remote login shell is tcsh
+    // and re-parses inline args, breaking on the SQL's spaces/quotes.
+    //
+    // FLYNAS_SSH is the whole ssh invocation (port, key, known_hosts), exported
+    // by ../../bin/_common.sh through the run-*.sh wrapper. Running this test
+    // by hand without it needs an ssh-config alias, which the claude-box
+    // sandbox does not have — use run-sso-ui.sh or run-all.sh.
+    const ssh = process.env.FLYNAS_SSH || 'ssh h2dev';
+    return execSync(`${ssh} sh`,
         { encoding: 'utf8', input: `sqlite3 /usr/local/flynas/flynas.db "${sql}"\n` }).trim();
 }
 

@@ -2,31 +2,38 @@
 
 Puppeteer-core driving system Chrome against the live h2dev VM.
 
-Setup:
-
 ```sh
-npm install puppeteer-core            # in this directory
-ssh -N -L 8443:localhost:443 h2dev &  # tunnel to FlyNAS HTTPS
-TOTP_SECRET=$(ssh h2dev sqlite3 /usr/local/flynas/flynas.db \
-    "\"SELECT totp_secret FROM users WHERE is_admin=1 LIMIT 1\"")
-TOTP_SECRET=$TOTP_SECRET node test-accounts.mjs
-TOTP_SECRET=$TOTP_SECRET node test-storage.mjs
-TOTP_SECRET=$TOTP_SECRET node test-network.mjs
-TOTP_SECRET=$TOTP_SECRET node test-monitoring.mjs
-TOTP_SECRET=$TOTP_SECRET node test-vms.mjs
-TOTP_SECRET=$TOTP_SECRET node test-apps.mjs
+npm install puppeteer-core     # in this directory, once
+./run-all.sh                   # the whole safe suite: one tunnel, one TOTP
 ```
 
-The `ssh -f -L 8443` tunnel drops intermittently in some environments
-and surfaces as bogus "page not loaded" / "element not found" failures.
-For reliable runs keep the tunnel in the same shell as the test:
+`run-all.sh` is the way in. It sources `../../bin/_common.sh`, so the
+tunnel and every DB probe use the harness's SSH identity — host, port
+2322 and key resolved by `hammer2-raid6/vmenv.sh`, **not** an
+`~/.ssh/config` alias. That matters inside the claude-box sandbox, which
+has no `~/.ssh` at all; see `hammer2-raid6/harness/README.md`. It also
+exports `FLYNAS_SSH` (the whole ssh invocation as one string) for the
+node tests that read the DB.
+
+To drive one test by hand, keep the tunnel in the same shell — the
+`ssh -f -L 8443` form drops intermittently in some environments and
+surfaces as bogus "page not loaded" / "element not found" failures:
 
 ```sh
-ssh -N -L 8443:localhost:443 h2dev & T=$!
+REPO="$(cd ../.. && pwd)"; . "$REPO/bin/_common.sh"
+TOTP_SECRET=$(vssh sh <<'EOF'
+sqlite3 /usr/local/flynas/flynas.db "SELECT totp_secret FROM users WHERE is_admin=1 LIMIT 1"
+EOF
+)
+ssh $VM_SSH_OPTS -N -L 8443:localhost:443 "$VM_TARGET" & T=$!
 sleep 3
 TOTP_SECRET=$TOTP_SECRET node test-vms.mjs
 kill $T
 ```
+
+Background the `ssh` line directly rather than `vssh`: backgrounding a
+shell *function* gives you the pid of a subshell, and killing that leaves
+the real tunnel running.
 
 Don't `pkill -f 'ssh … 8443'` to recycle the tunnel — the pattern
 matches the killer's own command line and takes out the shell
@@ -72,7 +79,7 @@ Preconditions (seed via API before running, clean up after):
 TOTP gotcha: `totp()` is computed on the **host** clock, but the server
 validates against the **VM** clock. The h2dev VM drifts (no steady NTP); >~30s
 skew makes every login fail with "invalid code". Before a run, sync it:
-`ssh h2dev date -u $(date -u +%Y%m%d%H%M.%S)`.
+`../../bin/exec "date -u $(date -u +%Y%m%d%H%M.%S)"`.
 
 Notes:
 

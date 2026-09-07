@@ -2,24 +2,34 @@
 # Control the DragonFly dev VM (h2dev) by delegating to the hammer2-raid6
 # harness that launches it — no duplicated QMP/console logic here.
 #
-#   bin/vm status      QMP query-status
-#   bin/vm reset       QMP system_reset (recover a wedged VM)
-#   bin/vm stop        QMP quit (shut the VM down)
-#   bin/vm console     follow the VM's serial console log
+#   bin/vm status          running? QMP state + whether SSH answers
+#   bin/vm wait [SECS]     block until the guest answers SSH
+#   bin/vm reset [SECS]    hard reset (recover a wedged VM), then wait
+#   bin/vm reboot [SECS]   graceful reboot over SSH, then wait
+#   bin/vm coldboot [SECS] quit QEMU; host-run.sh boots it fresh
+#   bin/vm stop            quit QEMU
+#   bin/vm save NAME       snapshot the live VM
+#   bin/vm load NAME       restore it — seconds, instead of a 8-12 min TCG boot
+#   bin/vm snapshots       list snapshots
+#   bin/vm console         follow the VM's serial console log
+#   bin/vm attach          attach to the live serial console (detach: C-])
+#   bin/vm log [N]         last N lines of console output
 #
+# Anything else is passed straight through to the harness's vmctl.sh.
 # Override the harness location with FLYNAS_H2 if it isn't ../hammer2-raid6.
 . "$(dirname "$0")/_common.sh"
 
-if [ ! -x "$H2/bin/qmp" ]; then
+if [ ! -x "$H2/vmctl.sh" ]; then
     echo "hammer2-raid6 harness not found at $H2 (set FLYNAS_H2)" >&2
     exit 1
 fi
 
 cmd="${1:-status}"
+shift 2>/dev/null || true
+
 case "$cmd" in
-    status) exec "$H2/bin/qmp" query-status ;;
-    reset)  exec "$H2/bin/qmp" system_reset ;;
-    stop)   exec "$H2/bin/qmp" quit ;;
-    console) exec "$H2/bin/console" follow ;;
-    *) echo "usage: bin/vm {status|reset|stop|console}" >&2; exit 2 ;;
+    stop)     exec "$H2/vmctl.sh" quit ;;
+    console)  exec "$H2/bin/console" follow ;;
+    attach)   exec "$H2/vmctl.sh" console ;;
+    *)        exec "$H2/vmctl.sh" "$cmd" "$@" ;;
 esac

@@ -8,8 +8,17 @@ A NAS appliance on DragonFlyBSD (HAMMER2 + web UI). Backend is OpenResty
 
 All development and testing runs against **h2dev**, a DragonFly 6.4 guest
 launched and babysat by the sibling `../hammer2-raid6` harness (QEMU + slirp,
-SSH forwarded to `127.0.0.1:2322`). Reach it via the `h2dev` alias in
-`~/.ssh/config` (user `root`).
+SSH forwarded to `127.0.0.1:2322`). See `../hammer2-raid6/harness/README.md`.
+
+The `bin/` helpers resolve host, port and SSH key from the harness's
+`vmenv.sh`, **not** from a `h2dev` entry in `~/.ssh/config` — the claude-box
+sandbox has no `~/.ssh` at all, so anything typing `ssh h2dev` by hand is dead
+in there. `bin/exec` and `bin/vm` work either way; use them.
+
+Inside the sandbox the VM must also be running **on the host** (`host-run.sh`)
+with the `net 127.0.0.1:2322` bridge in `sandbox.conf`, or a boxed QEMU falls
+back to TCG and takes 8-12 minutes per boot. `bin/vm save <name>` /
+`bin/vm load <name>` snapshot around that.
 
 **The VM login shell is tcsh.** A bare `ssh h2dev '<sh script>'` will fail
 (`Illegal variable name`) on anything with sh syntax. Always force sh — the
@@ -31,7 +40,7 @@ Use these instead of ad-hoc ssh/scp:
 | `bin/check` | Lint all overlay Lua against the VM's LuaJIT (pre-deploy) |
 | `bin/deploy [--restart] [--no-check]` | rsync overlay → rebuild setuid helper → reload + health-check |
 | `bin/logs {flynas\|master\|access\|vm <name>\|console} [-f]` | Tail the right log |
-| `bin/vm {status\|reset\|stop\|console}` | Control h2dev via the hammer2-raid6 harness |
+| `bin/vm {status\|wait\|reset\|reboot\|coldboot\|stop\|save\|load\|snapshots\|console\|attach\|log}` | Control h2dev via the hammer2-raid6 harness (anything else is passed through to its `vmctl.sh`) |
 
 `bin/deploy` defaults to `service flynas reload`. Use `--restart` when
 `init.lua`, `schema.sql`, a recipe, or `nginx.conf` changed — `init_by_lua`
@@ -55,6 +64,11 @@ re-seeds the DB and app catalog only at master start.
 
 - `tools/uitest/run-all.sh` — the whole safe suite under one tunnel with one
   TOTP extraction and a pass/fail summary. Prefer this.
+- The runners source `bin/_common.sh`, so the tunnel and every DB probe use the
+  harness identity (no `~/.ssh/config` needed) and `FLYNAS_SSH` is exported for
+  the node tests that read the DB. Background the raw `ssh $VM_SSH_OPTS ...`
+  for a tunnel, never `vssh` — backgrounding a function gives you a subshell
+  pid and killing it leaves the tunnel behind.
 - Storage/backup and app-SSO tests are stateful (scratch disks + fstab, or a
   live provisioned guest) and stay as dedicated scripts (`run-app-sso.sh`,
   etc.). See `tools/uitest/README.md`.
