@@ -29,29 +29,38 @@ payoff/difficulty:
 Each recipe: `lua/recipes/<app>.yaml` + `oidc_redirect_path` seed + verify
 boot + SSO on h2dev.
 
-### 2. Quick fixes noted in step 7 — do before the recipe fan-out
+### 2. Quick fixes noted in step 7 — **BOTH DONE (2026-09-07)**
 
-- **dnsmasq reservation race** — a guest got a dynamic IP despite a correct
-  reservation. Bites every app install; deterministic IPs matter more with 8
-  more recipes coming.
-- **SameSite=Strict → Lax** on the session cookie — cross-host SSO re-login
-  breaks in production; one-line fix, retest e2e.
+- ~~**dnsmasq reservation race**~~ — **fixed.** Root cause was not SIGHUP
+  timing but an overlapping pool: `dhcp-range=.50-.250` covered the reservation
+  range, so losing the race produced a *valid* dynamic lease. Now
+  `dhcp-range=10.77.0.0,static` (reservations only). `forge1` took its reserved
+  `10.77.0.101` on first boot.
+- ~~**SameSite=Strict → Lax**~~ — **fixed** and verified on the wire (the
+  logout cookie had to change with it, or the browser keeps the original).
 
-### 3. Installer rework (step 13, marked ◐)
+### 3. Installer rework (step 13) — **DONE and proven (2026-09-07)**
 
-`install.sh` is stale vs. the current layout. Accumulated TODO list:
+Reworked and exercised on a pristine guest: install → service up → admin →
+Forgejo installed, provisioned and serving, `OIDC registration: ok`. The one
+step not re-run is the browser SSO click (no Chrome in the sandbox — dangling
+symlink into an unmounted `/opt/google`).
 
-- Alpine base image fetch + `no_timer_check` patch (needs a Linux host —
-  awkward; consider hosting a pre-patched image somewhere)
-- `nvmm_load="YES"` in loader.conf
-- OIDC keypair generation
-- `seeds/` and `images/` directories
-- dnsmasq setup
-- pf anchors
-- cron jobs
+The list it was carrying, all now handled except where noted:
 
-Worth doing soon — the gap between "works on h2dev" and "installable" grows
-with each feature.
+- Alpine base image fetch + `no_timer_check` patch — **still open.** The
+  installer takes a pre-patched image via `FLYNAS_ALPINE_IMAGE` and warns when
+  there is none; it cannot make one, since patching means writing ext4. Hosting
+  a pre-patched image is still the way out.
+- ~~`nvmm_load="YES"` in loader.conf~~ — done
+- ~~OIDC keypair generation~~ — done
+- ~~`seeds/` and `images/` directories~~ — done
+- ~~dnsmasq setup~~ — done (package + conf ship in the overlay)
+- ~~pf anchors~~ — done (modules loaded; the helper loads the anchor)
+- ~~cron jobs~~ — done (hourly-snapshots; daily-scrub does not exist yet)
+
+The gap between "works on h2dev" and "installable" is closed for now; it will
+reopen with each feature, so re-run the fresh-install path periodically.
 
 ### 4. Cleanup of deferred small items (pick off between recipes)
 
@@ -69,7 +78,8 @@ with each feature.
 
 ## Recommendation
 
-Do the two step-7 follow-up fixes first (small, correctness), then the
-VaultWarden recipe (fast pattern confirmation), then Seafile (hard, high
-value). Rework the installer once ~3 recipes are green — then the full
-fresh-install path can be tested on a clean VM.
+*Superseded 2026-09-07: the two fixes and the installer are done, and the
+fresh-install path has been tested on a clean VM.* Next is the recipe fan-out
+itself — **VaultWarden** (single container, OIDC-only; note its
+`oidc_redirect_path` is not seeded yet — `OIDC_REDIRECTS` in `init.lua` has
+only Seafile and Forgejo), then **Seafile**, then **Jellyfin**.

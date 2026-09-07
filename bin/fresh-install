@@ -1,0 +1,81 @@
+#!/bin/sh
+# fresh-install — drive install.sh onto a pristine h2dev and verify it.
+#
+#   bin/fresh-install check     confirm the guest really is virgin
+#   bin/fresh-install push      copy install.sh + overlay + the base image over
+#   bin/fresh-install install   run install.sh on the guest
+#   bin/fresh-install start     start the service and health-check it
+#   bin/fresh-install all       all four, in order
+#
+# This is the "works on h2dev" vs "installable" check: bin/deploy only ever
+# rsyncs onto a box that FlyNAS is already installed on, so nothing else
+# exercises package installation, group creation, permissions or NVMM setup.
+# Re-run it whenever install.sh or the overlay layout changes.
+#
+# The guest must ALREADY be reset — this script deliberately does not do that,
+# because the reset needs the QEMU supervisor stopped and that cannot be done
+# from inside the claude-box sandbox (different PID namespace). On the host:
+#
+#   cd ../hammer2-raid6
+#   kill $(cat run/supervisor.pid)    # stops supervisor + QEMU
+#   ./launch-dfly.sh reset           # overlay <- locked base image
+#   ./host-run.sh &                  # supervisor back up
+#
+# FLYNAS_ALPINE_IMAGE overrides where the app-VM base image is read from; it
+# defaults to the copy kept beside the harness, since a reset destroys the one
+# inside the guest and it cannot be regenerated on DragonFly (see
+# docs/FlyNAS-plan.md §2.11 step 1).
+set -e
+. "$(dirname "$0")/_common.sh"
+
+ALPINE="${FLYNAS_ALPINE_IMAGE:-$H2/artifacts/alpine-no_timer_check.qcow2}"
+SRC=/root/flynas-src
+
+do_check() {
+    echo "==> guest identity"
+    rsh 'uname -a; uptime'
+    echo "==> must be absent on a virgin guest"
+    rsh '
+    for p in /usr/local/flynas /var/run/flynas /usr/local/etc/rc.d/flynas; do
+        if [ -e "$p" ]; then echo "  PRESENT (not virgin): $p"; else echo "  absent: $p"; fi
+    done
+    echo "  flynas group: $(pw groupshow flynas 2>&1)"
+    echo "  rc.conf flynas_enable lines: $(grep -c flynas_enable /etc/rc.conf || true)"
+    '
+}
+
+do_push() {
+    echo "==> rsync install.sh + overlay -> $SRC"
+    rsh "mkdir -p $SRC"
+    rsync -a --delete -e "$VM_RSYNC_RSH" \
+        "$REPO/install.sh" "$OVERLAY" "$VM_TARGET:$SRC/"
+    if [ -f "$ALPINE" ]; then
+        echo "==> scp app-VM base image ($(basename "$ALPINE"))"
+        # shellcheck disable=SC2086  # VM_SCP_OPTS must word-split
+        scp $VM_SCP_OPTS "$ALPINE" "$VM_TARGET":/root/alpine.qcow2
+    else
+        echo "==> no base image at $ALPINE — install will warn and continue" >&2
+    fi
+}
+
+do_install() {
+    echo "==> install.sh on the guest"
+    rsh "cd $SRC && FLYNAS_ALPINE_IMAGE=/root/alpine.qcow2 sh install.sh"
+}
+
+do_start() {
+    echo "==> service flynas start"
+    rsh 'service flynas start || true; sleep 3; service flynas status'
+    echo "==> health"
+    rsh 'curl -ks -o /dev/null -w "  /api/health -> %{http_code}\n" https://localhost/api/health
+         printf "  /api/setup/status -> "; curl -ks https://localhost/api/setup/status'
+}
+
+case "${1:-all}" in
+    check)   do_check ;;
+    push)    do_push ;;
+    install) do_install ;;
+    start)   do_start ;;
+    all)     do_check; do_push; do_install; do_start ;;
+    *) echo "usage: bin/fresh-install {check|push|install|start|all}" >&2; exit 2 ;;
+esac

@@ -1040,6 +1040,51 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
 
 ## Progress Log
 
+- **2026-09-07**: Step-7 follow-ups closed and the **fresh-install path proven
+  end to end** on a pristine guest (overlay reset from the locked base).
+  - **SameSite=Strict → Lax** on the session cookie (`auth.lua`). SSO begins
+    with a top-level nav from the app to `/authorize`, which is cross-site the
+    moment FlyNAS and the app differ in hostname; a Strict cookie does not ride
+    it, so every sign-on became a re-login. The logout cookie had to change
+    with it — mismatched attributes leave the original in place. Verified on
+    the wire, twice.
+  - **dnsmasq reservation race — root cause was not SIGHUP timing.**
+    `sync_dhcp` already runs at install time while the VM is `stopped`, long
+    before the guest boots. The bug was `dhcp-range=10.77.0.50,10.77.0.250`,
+    a pool *overlapping* the reservation range (`10.77.0.<100+id>`): losing the
+    race yielded a valid 12h dynamic lease, not a missing one. Now
+    `dhcp-range=10.77.0.0,static` — reservations only, so the same race costs a
+    retry instead of a wrong address. `forge1` came up on its reserved
+    `10.77.0.101` on first boot (the July run had been retargeted to `.102`).
+  - **Installer reworked (step 13).** The old one created a `flynas` *user* and
+    chowned the tree to it; there is no such user — nginx runs `www` in the
+    `flynas` group, and the tree needs 2775 setgid for SQLite's WAL files. It
+    also installed only the web stack. Now also: dnsmasq/qemu/cdrtools,
+    `images/` + `seeds/` (0700, one-time OIDC secrets), OIDC keypair with
+    deterministic ownership, `nvmm_load="YES"`, if_bridge/pf, the snapshot
+    cron, and the Alpine base via `FLYNAS_ALPINE_IMAGE`. It still cannot
+    *produce* that image — patching `no_timer_check` means writing ext4, which
+    DragonFly cannot do — so it takes a supplied one and warns when absent.
+  - **Verified on a virgin `v6.4.2-RELEASE #11` guest:** install.sh clean →
+    service up (`health=200`, `setup_done:false`) → admin via `/api/setup` →
+    bridge + dnsmasq up → Forgejo installed (deterministic `.101`) → seed ISO
+    built → QEMU with `accel=nvmm` → cloud-init: docker → container pulled →
+    healthcheck → **`OIDC registration: ok`** (242s) → Forgejo serves 200 with
+    "Sign in with flynas" on `/user/login`.
+  - **Not re-verified: the browser SSO click-through.** `/usr/bin/google-chrome`
+    in the claude-box sandbox is a dangling symlink into `/opt/google`, which
+    `sandbox.conf` does not mount. The chain up to it is confirmed, and the
+    July browser round-trip is unchanged code — but the click itself was not
+    re-run. Add `ro /opt/google` to `sandbox.conf`, or run it outside the box.
+  - **uitest tunnels could pass without a tunnel.** `run-all.sh` /
+    `run-app-sso.sh` forwarded 8443, which inside the sandbox is the box's own
+    HTTPS proxy, and ssh defaults `ExitOnForwardFailure=no` — so the bind
+    failed, ssh stayed up, and the health check hit the proxy. Both now use
+    `FLYNAS_PORT` (default 19443) and make the forward fatal.
+  - **pf port-forward untestable from here:** the rdr anchor is correct
+    (`rdr pass on vtnet0 ... 20001 -> 10.77.0.101:3000`) but loopback never
+    traverses `vtnet0`, so a LAN client is needed to exercise it.
+
 - **2026-06-30**: Guest provisioning kickoff (§2.11). Decided the mechanism —
   **cloud-init + Docker on an Alpine `generic` cloud image**, per-VM NoCloud
   `cidata` seed; **QEMU+NVMM kept, Firecracker rejected** (KVM-only, no NVMM

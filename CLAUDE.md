@@ -41,6 +41,7 @@ Use these instead of ad-hoc ssh/scp:
 | `bin/deploy [--restart] [--no-check]` | rsync overlay → rebuild setuid helper → reload + health-check |
 | `bin/logs {flynas\|master\|access\|vm <name>\|console} [-f]` | Tail the right log |
 | `bin/vm {status\|wait\|reset\|reboot\|coldboot\|stop\|save\|load\|snapshots\|console\|attach\|log}` | Control h2dev via the hammer2-raid6 harness (anything else is passed through to its `vmctl.sh`) |
+| `bin/fresh-install [check\|push\|install\|start\|all]` | Run `install.sh` onto a freshly-reset guest and verify it — the only thing that exercises the install path (`bin/deploy` assumes FlyNAS is already there) |
 
 `bin/deploy` defaults to `service flynas reload`. Use `--restart` when
 `init.lua`, `schema.sql`, a recipe, or `nginx.conf` changed — `init_by_lua`

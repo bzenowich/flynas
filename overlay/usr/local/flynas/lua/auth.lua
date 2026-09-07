@@ -62,10 +62,19 @@ function _M.create_session(user_id, state)
         return nil, db_err
     end
 
-    -- Only set cookie for active sessions
+    -- Only set cookie for active sessions.
+    --
+    -- SameSite=Lax, not Strict: SSO starts with a top-level navigation from
+    -- the app to /authorize, and that is cross-site as soon as FlyNAS and the
+    -- app have different hostnames — which is every real deployment, though
+    -- not h2dev, where both are localhost and Strict looked fine. A Strict
+    -- cookie does not ride that nav, so /authorize sees no session and makes
+    -- the user log in again on every single sign-on. Lax still withholds the
+    -- cookie from cross-site POSTs and subresource loads, which is the CSRF
+    -- case that matters here.
     if state == "active" then
         ngx.header["Set-Cookie"] = string.format(
-            "flynas_session=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d",
+            "flynas_session=%s; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=%d",
             token, SESSION_TTL
         )
     end
@@ -108,9 +117,10 @@ function _M.destroy_session()
     conn:query("DELETE FROM sessions WHERE token = ?", cookie)
     conn:close()
 
-    -- Clear cookie
+    -- Clear cookie. The attributes must match the ones it was set with
+    -- (above) or the browser keeps the original cookie alongside this one.
     ngx.header["Set-Cookie"] =
-        "flynas_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"
+        "flynas_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
 
     return true
 end

@@ -22,7 +22,10 @@ REPO="$(cd ../.. && pwd)"
 . "$REPO/bin/_common.sh"
 
 DB="/usr/local/flynas/flynas.db"
-PORT=8443
+# Not 8443: inside the claude-box sandbox that port is the box's own
+# HTTPS proxy (socat -> proxy.sock, see sandbox.conf), and a forward that
+# loses the bind would leave the tests talking to it.
+PORT="${FLYNAS_PORT:-19443}"
 
 # All SQL/sh is piped to `vssh sh` via heredoc — the VM login shell is
 # tcsh and re-parses any inline command, choking on SQL parens (see README).
@@ -47,7 +50,8 @@ export TOTP_SECRET
 # Backgrounded directly, not through vssh(): backgrounding a function gives
 # the pid of a subshell, and killing that would leave the tunnel behind.
 # shellcheck disable=SC2086  # VM_SSH_OPTS must word-split
-ssh $VM_SSH_OPTS -N -L "$PORT:localhost:443" "$VM_TARGET" & T=$!
+ssh $VM_SSH_OPTS -o ExitOnForwardFailure=yes -N -L "$PORT:localhost:443" \
+    "$VM_TARGET" & T=$!
 sleep 3
 curl -ks "https://localhost:$PORT/api/health" >/dev/null \
     || { echo "tunnel/health check failed"; exit 1; }
