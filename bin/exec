@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run a command on the FlyNAS dev VM (replaces the stale dfly-exec.sh).
+# The VM login shell is tcsh, so commands are forced through sh.
+#
+#   bin/exec                     → interactive shell on the VM
+#   bin/exec 'sqlite3 ... "..."' → run one sh command line and print output
+. "$(dirname "$0")/_common.sh"
+
+if [ $# -eq 0 ]; then
+    exec ssh "$VM"
+fi
+rsh "$*"

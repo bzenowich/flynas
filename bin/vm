@@ -1,0 +1,25 @@
+#!/bin/sh
+# Control the DragonFly dev VM (h2dev) by delegating to the hammer2-raid6
+# harness that launches it — no duplicated QMP/console logic here.
+#
+#   bin/vm status      QMP query-status
+#   bin/vm reset       QMP system_reset (recover a wedged VM)
+#   bin/vm stop        QMP quit (shut the VM down)
+#   bin/vm console     follow the VM's serial console log
+#
+# Override the harness location with FLYNAS_H2 if it isn't ../hammer2-raid6.
+. "$(dirname "$0")/_common.sh"
+
+if [ ! -x "$H2/bin/qmp" ]; then
+    echo "hammer2-raid6 harness not found at $H2 (set FLYNAS_H2)" >&2
+    exit 1
+fi
+
+cmd="${1:-status}"
+case "$cmd" in
+    status) exec "$H2/bin/qmp" query-status ;;
+    reset)  exec "$H2/bin/qmp" system_reset ;;
+    stop)   exec "$H2/bin/qmp" quit ;;
+    console) exec "$H2/bin/console" follow ;;
+    *) echo "usage: bin/vm {status|reset|stop|console}" >&2; exit 2 ;;
+esac

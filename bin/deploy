@@ -1,0 +1,86 @@
+#!/bin/sh
+# Deploy the overlay to the FlyNAS dev VM, rebuild the setuid helper, and
+# reload the service. Encodes the ownership/permission rules that used to
+# live only in session memory.
+#
+#   bin/deploy               rsync overlay, rebuild helper, `service flynas reload`
+#   bin/deploy --restart     full `service flynas restart` — REQUIRED when
+#                            init.lua / schema.sql / recipes / nginx.conf change
+#                            (init_by_lua re-seeds the DB + app catalog only at
+#                            master start).
+#   bin/deploy --no-check    skip the Lua lint (bin/check)
+#
+# Runtime state (flynas.db, ssl/, logs/) is never overwritten.
+set -e
+. "$(dirname "$0")/_common.sh"
+
+restart=0
+check=1
+for a in "$@"; do
+    case "$a" in
+        --restart)  restart=1 ;;
+        --no-check) check=0 ;;
+        *) echo "usage: bin/deploy [--restart] [--no-check]" >&2; exit 2 ;;
+    esac
+done
+
+if [ "$check" -eq 1 ]; then
+    echo "==> lint (bin/check)"
+    "$BIN_DIR/check"
+fi
+
+# Sync only the flynas subtree + the rc.d script — NOT the whole overlay from
+# `/`, which would make rsync rewrite the attributes of /usr and /usr/local.
+# No --delete: runtime dirs on the VM (bin/, seeds/, ssl/, images/) persist.
+# Runtime state (DB, WAL, ssl/, logs/) is excluded.
+echo "==> rsync overlay/usr/local/flynas -> $VM"
+rsync -a \
+    --exclude 'flynas.db' \
+    --exclude 'flynas.db-shm' \
+    --exclude 'flynas.db-wal' \
+    --exclude 'ssl/' \
+    --exclude 'logs/' \
+    "$OVERLAY"/usr/local/flynas/ "$VM":/usr/local/flynas/
+echo "==> rsync rc.d/flynas"
+rsync -a "$OVERLAY"/usr/local/etc/rc.d/flynas "$VM":/usr/local/etc/rc.d/flynas
+
+# Permissions. There is no `flynas` USER on the box — only the group (gid
+# flynas); nginx runs `www`, which is a member. www needs group-write on the
+# DB directory to create SQLite WAL files, so set it group=flynas, setgid,
+# group-writable. The setuid helper must be root-owned, group flynas, 4750.
+# We touch only these two things — seeds/ (root 0700, holds OIDC secrets) and
+# ssl/ are left alone.
+echo "==> fix DB-dir group + rebuild setuid helper"
+rsh '
+set -e
+chgrp flynas /usr/local/flynas
+chmod 2775 /usr/local/flynas
+mkdir -p /usr/local/flynas/bin
+cc -o /usr/local/flynas/bin/flynas-helper /usr/local/flynas/scripts/flynas-helper.c
+chgrp flynas /usr/local/flynas/bin/flynas-helper
+chmod 4750 /usr/local/flynas/bin/flynas-helper
+echo "helper rebuilt: $(ls -l /usr/local/flynas/bin/flynas-helper)"
+'
+
+if [ "$restart" -eq 1 ]; then
+    echo "==> service flynas restart"
+    rsh 'service flynas restart'
+else
+    echo "==> service flynas reload"
+    rsh 'service flynas reload'
+fi
+
+echo "==> health check"
+code=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$(rsh 'curl -ks -o /dev/null -w "%{http_code}" https://localhost/api/health' 2>/dev/null || true)"
+    [ "$code" = "200" ] && break
+    sleep 1
+done
+if [ "$code" = "200" ]; then
+    echo "OK: /api/health -> 200"
+else
+    echo "WARN: /api/health -> ${code:-no-response}. Recent errors:" >&2
+    rsh 'tail -n 20 /var/log/flynas/error.log 2>/dev/null' >&2 || true
+    exit 1
+fi

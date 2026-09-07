@@ -1,0 +1,48 @@
+#!/bin/sh
+# Tail the right FlyNAS log — encodes the "two error.logs" gotcha so nobody
+# has to rediscover it.
+#
+#   bin/logs flynas  [-f]      /var/log/flynas/error.log      (http context — the useful one)
+#   bin/logs master  [-f]      /usr/local/flynas/logs/error.log (nginx master only)
+#   bin/logs access  [-f]      /usr/local/flynas/logs/access.log
+#   bin/logs vm <name> [-f]    /var/log/flynas/vm-<name>.log  (a nested app-VM's serial console)
+#   bin/logs console [-f]      the h2dev DragonFly VM's own serial (via the hammer2-raid6 harness)
+#
+# -f follows.
+. "$(dirname "$0")/_common.sh"
+
+what="${1:-flynas}"
+shift 2>/dev/null || true
+
+follow=0
+name=""
+for a in "$@"; do
+    case "$a" in
+        -f) follow=1 ;;
+        *)  name="$a" ;;
+    esac
+done
+
+# The DragonFly VM's own console is captured by the sibling harness, not us.
+if [ "$what" = "console" ]; then
+    if [ "$follow" -eq 1 ]; then
+        exec "$H2/bin/console" follow
+    fi
+    exec "$H2/bin/console" tail
+fi
+
+case "$what" in
+    flynas) path="/var/log/flynas/error.log" ;;
+    master) path="$FLYNAS_DIR/logs/error.log" ;;
+    access) path="$FLYNAS_DIR/logs/access.log" ;;
+    vm)
+        [ -n "$name" ] || { echo "usage: bin/logs vm <name> [-f]" >&2; exit 2; }
+        path="/var/log/flynas/vm-$name.log" ;;
+    *) echo "usage: bin/logs {flynas|master|access|vm <name>|console} [-f]" >&2; exit 2 ;;
+esac
+
+if [ "$follow" -eq 1 ]; then
+    rsh "tail -F '$path'"
+else
+    rsh "tail -n 120 '$path'"
+fi

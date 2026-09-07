@@ -1,0 +1,30 @@
+#!/bin/sh
+# Pre-deploy lint: syntax-check every overlay Lua file against the VM's
+# LuaJIT (the same interpreter that runs it), so a typo surfaces here
+# instead of as an init_by_lua failure after `service flynas reload`.
+#
+# The setuid helper (flynas-helper.c) is NOT checked here — it uses BSD-only
+# headers (getmntinfo/struct statfs) that don't compile on a Linux host. Its
+# real gate is the on-VM `cc` build in bin/deploy, which fails loudly.
+. "$(dirname "$0")/_common.sh"
+
+# LuaJIT one-liner: read the file on stdin, compile it, throw on syntax error.
+LUACHK='luajit -e '\''assert(loadstring(io.read("*a")))'\'''
+tmp="/tmp/flynas-check.$$"
+fail=0
+n=0
+
+for f in $(find "$OVERLAY" -name '*.lua' | sort); do
+    n=$((n + 1))
+    if ! ssh "$VM" "$LUACHK" < "$f" >/dev/null 2>"$tmp"; then
+        echo "LUA SYNTAX ERROR: ${f#"$OVERLAY"/}"
+        sed 's/^/    /' "$tmp"
+        fail=1
+    fi
+done
+rm -f "$tmp"
+
+if [ "$fail" -eq 0 ]; then
+    echo "lua: all $n files OK"
+fi
+exit "$fail"
