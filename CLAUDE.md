@@ -1,22 +1,74 @@
-# DragonFlyBSD Development Environment
+# FlyNAS — DragonFlyBSD NAS Appliance
 
-## System Info
-- DragonFlyBSD 6.4.2 (BSD, not Linux)
-- Default shell: tcsh
-- VM runs via QEMU with bridged networking (IP: 192.168.25.102)
+A NAS appliance on DragonFlyBSD (HAMMER2 + web UI). Backend is OpenResty
+(nginx + LuaJIT) + SQLite; frontend is Clay compiled to WASM. See
+`docs/FlyNAS-plan.md` for the full plan and progress log.
 
-## Remote Access
-- Run commands on DragonFlyBSD via: `./dfly-exec.sh <command>`
-- This SSHes as user `bz` to 192.168.25.102
-- Set `DFLY_IP` env var to override the IP
+## Dev VM: h2dev
 
-## File Access
-- User bz's home directory is mounted at `mnt/dfly` (relative to project root) via SSHFS
-- Read/edit DragonFlyBSD files through `mnt/dfly/`
+All development and testing runs against **h2dev**, a DragonFly 6.4 guest
+launched and babysat by the sibling `../hammer2-raid6` harness (QEMU + slirp,
+SSH forwarded to `127.0.0.1:2322`). Reach it via the `h2dev` alias in
+`~/.ssh/config` (user `root`).
 
-## Important Differences from Linux
-- Package manager: `pkg` (not apt/dnf)
-- Init system: rc.d scripts (not systemd)
-- Compiler: gcc or clang from base
-- Make: BSD make (not GNU make)
-- No Linux binary emulation
+**The VM login shell is tcsh.** A bare `ssh h2dev '<sh script>'` will fail
+(`Illegal variable name`) on anything with sh syntax. Always force sh — the
+`bin/` helpers do this for you; when going direct, pipe to sh:
+
+```sh
+ssh h2dev sh <<'EOF'
+sqlite3 /usr/local/flynas/flynas.db "SELECT ..."
+EOF
+```
+
+## bin/ harness
+
+Use these instead of ad-hoc ssh/scp:
+
+| Command | What |
+|---|---|
+| `bin/exec [cmd]` | Run a command on h2dev (sh-wrapped), or open a shell |
+| `bin/check` | Lint all overlay Lua against the VM's LuaJIT (pre-deploy) |
+| `bin/deploy [--restart] [--no-check]` | rsync overlay → rebuild setuid helper → reload + health-check |
+| `bin/logs {flynas\|master\|access\|vm <name>\|console} [-f]` | Tail the right log |
+| `bin/vm {status\|reset\|stop\|console}` | Control h2dev via the hammer2-raid6 harness |
+
+`bin/deploy` defaults to `service flynas reload`. Use `--restart` when
+`init.lua`, `schema.sql`, a recipe, or `nginx.conf` changed — `init_by_lua`
+re-seeds the DB and app catalog only at master start.
+
+## Layout & deploy model
+
+- `overlay/` mirrors the on-VM tree rooted at `/` (e.g.
+  `overlay/usr/local/flynas/...`). `bin/deploy` rsyncs it, preserving runtime
+  state (`flynas.db`, `ssl/`, `logs/` are never overwritten).
+- The service runs as `www` in group `flynas`; `/usr/local/flynas` stays
+  group-writable (775 dirs) so SQLite WAL files work across nginx workers.
+- Privileged ops go through the **setuid helper** `flynas-helper.c`
+  (root:flynas, 4750), rebuilt on the VM by `bin/deploy` (`cc`). It cannot be
+  compiled on a Linux host — it uses BSD-only headers (`getmntinfo`,
+  `struct statfs`).
+
+## UI tests
+
+`tools/uitest/` — Puppeteer driving system Chrome over an ssh `-L 8443` tunnel.
+
+- `tools/uitest/run-all.sh` — the whole safe suite under one tunnel with one
+  TOTP extraction and a pass/fail summary. Prefer this.
+- Storage/backup and app-SSO tests are stateful (scratch disks + fstab, or a
+  live provisioned guest) and stay as dedicated scripts (`run-app-sso.sh`,
+  etc.). See `tools/uitest/README.md`.
+- Never `pkill -f 'ssh … 8443'` to recycle a tunnel — it matches the killer's
+  own command line and takes out the shell.
+
+## DragonFly vs Linux
+
+- Packages: `pkg` (not apt/dnf). Init: rc.d (not systemd). Make: BSD make.
+- No Linux binary emulation; the WASM UI is cross-compiled on Linux
+  (`ui/build.sh`) and only the artifacts ship to the NAS.
+
+## Docs
+
+`docs/` — `FlyNAS-plan.md` (plan + progress log), `challenges.md`,
+`plan_july.md` (next steps), `develop_july.md` (dev-scaffolding eval).
+Retired legacy launch/mount scripts live in `attic/`.
