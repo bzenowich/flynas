@@ -175,6 +175,14 @@ do
             " duplicate/missing VM MAC(s); resyncing DHCP reservations. ",
             "Restart any running app VM to pick up its new MAC.")
         require("util.vmnet").sync_dhcp(conn)
+        -- ...and drop the leases those old MACs are still holding. Without
+        -- this the repair strands exactly the VMs it just fixed: the address
+        -- stays checked out to the MAC we replaced for the rest of its 12h
+        -- lease, so the guest reboots onto its new MAC, finds its reserved
+        -- address taken and gets nothing. SIGHUP will not do it — dnsmasq
+        -- re-reads reservations on HUP but never the lease file — so this
+        -- bounces the daemon, which is why it is not on the normal sync path.
+        require("util.exec").dhcp_prune()
     end
 end
 

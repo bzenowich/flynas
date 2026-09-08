@@ -154,6 +154,13 @@ function _M.vmbridge_down()
     return run({ "netbridge", "down" })
 end
 
+-- Drop leases whose MAC is no longer reserved, then restart dnsmasq. Heavier
+-- than dhcp_reload (it bounces the daemon), so it is only for the case a
+-- SIGHUP cannot fix: a reservation whose MAC changed under a live lease.
+function _M.dhcp_prune()
+    return run({ "dhcpprune" })
+end
+
 function _M.dhcp_reload()
     return run({ "dhcpreload" })
 end

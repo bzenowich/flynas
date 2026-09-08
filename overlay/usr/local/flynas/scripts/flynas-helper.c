@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <ctype.h>
@@ -1072,7 +1073,13 @@ static int do_vmstart(char *argv[])
 
     /* Run dir setgid-flynas + umask 007 so QEMU's QMP/serial unix
      * sockets come out group-writable (mode 0770 root:flynas). nginx
-     * (www, in flynas) needs *write* on the socket file to connect(). */
+     * (www, in flynas) needs *write* on the socket file to connect().
+     *
+     * 02770 gives no world access on purpose, so anything else that must read
+     * a file in here has to be IN the flynas group — dnsmasq is, via
+     * `group=flynas` in conf/dnsmasq.conf. Without that it drops to plain
+     * `nobody`, cannot traverse this directory, and serves no reservations at
+     * all while logging only a single "Permission denied" line. */
     mkdir(VM_RUN_DIR, 0770);
     {
         struct group *g = getgrnam("flynas");
@@ -1246,6 +1253,8 @@ static int do_vmdelete(const char *name, const char *volume)
 #define DNSMASQ_CONF "/usr/local/flynas/conf/dnsmasq.conf"
 #define DHCP_HOSTS VM_RUN_DIR "/dhcp-hosts"
 #define DNSMASQ_PID VM_RUN_DIR "/dnsmasq.pid"
+/* Must match dhcp-leasefile in conf/dnsmasq.conf. */
+#define DNSMASQ_LEASES VM_RUN_DIR "/dnsmasq.leases"
 #define PF_FWD_SPEC VM_RUN_DIR "/fwd-spec"
 #define PF_FWD_ANCHOR "flynas-fwd"
 #define VM_NET_PREFIX "10.77.0."
@@ -1347,6 +1356,106 @@ static int do_dhcpreload(void)
     long pid = read_pidfile(DNSMASQ_PID);
     if (pid > 0 && kill((pid_t)pid, 0) == 0)
         kill((pid_t)pid, SIGHUP);
+    return 0;
+}
+
+/* Is this MAC still reserved in DHCP_HOSTS? Lines are "mac,ip,name". */
+static int mac_is_reserved(const char *mac)
+{
+    FILE *f = fopen(DHCP_HOSTS, "r");
+    char line[256];
+    int found = 0;
+
+    if (!f)
+        return 0;
+    while (!found && fgets(line, sizeof(line), f)) {
+        char *comma = strchr(line, ',');
+        if (!comma)
+            continue;
+        *comma = '\0';
+        if (strcasecmp(line, mac) == 0)
+            found = 1;
+    }
+    fclose(f);
+    return found;
+}
+
+/* dhcpprune: drop leases whose MAC is no longer reserved, then restart.
+ *
+ * SIGHUP makes dnsmasq re-read the reservations file but NOT the lease file,
+ * and a lease outlives the reservation that produced it. That matters when a
+ * VM's MAC changes underneath a live lease: the address stays checked out to
+ * the old MAC for the rest of the lease, the guest comes back on its new one,
+ * finds its reserved address taken and gets nothing at all. So the file has to
+ * be edited and dnsmasq bounced — and edited while it is down, because dnsmasq
+ * rewrites the file itself and would overwrite us.
+ *
+ * Leases are rewritten in place rather than deleted wholesale so that guests
+ * whose reservation did not change keep theirs and do not have to re-DHCP.
+ */
+static int do_dhcpprune(void)
+{
+    FILE *in, *out;
+    char line[512], tmp[sizeof(DNSMASQ_LEASES) + 8];
+    long pid;
+    int dropped = 0;
+
+    if (access(DNSMASQ_LEASES, F_OK) != 0)
+        return 0;               /* nothing has ever leased; nothing to do */
+
+    pid = read_pidfile(DNSMASQ_PID);
+    if (pid > 0 && kill((pid_t)pid, 0) == 0) {
+        kill((pid_t)pid, SIGTERM);
+        /* Give it a moment to write out and exit before we touch the file. */
+        for (int i = 0; i < 50 && kill((pid_t)pid, 0) == 0; i++)
+            usleep(100000);
+    }
+    unlink(DNSMASQ_PID);
+
+    snprintf(tmp, sizeof(tmp), "%s.new", DNSMASQ_LEASES);
+    in = fopen(DNSMASQ_LEASES, "r");
+    if (!in) {
+        start_dnsmasq();
+        return 0;
+    }
+    out = fopen(tmp, "w");
+    if (!out) {
+        fclose(in);
+        start_dnsmasq();
+        die("dhcpprune: cannot write the new lease file");
+    }
+    /* "<expiry> <mac> <ip> <name> <clientid>" — keep the line if its MAC is
+     * still reserved. A malformed line is kept: dropping a lease we cannot
+     * parse would be a worse failure than leaving it. */
+    while (fgets(line, sizeof(line), in)) {
+        char copy[512], *mac;
+        snprintf(copy, sizeof(copy), "%s", line);
+        strtok(copy, " ");                  /* expiry */
+        mac = strtok(NULL, " ");
+        if (mac && !mac_is_reserved(mac)) {
+            dropped++;
+            continue;
+        }
+        fputs(line, out);
+    }
+    fclose(in);
+    fclose(out);
+
+    if (rename(tmp, DNSMASQ_LEASES) != 0) {
+        unlink(tmp);
+        start_dnsmasq();
+        die("dhcpprune: cannot replace the lease file");
+    }
+    /* We rewrote it as root; dnsmasq comes back as nobody:flynas and has to
+     * keep writing it, so hand the group write access back. */
+    {
+        struct group *g = getgrnam("flynas");
+        if (g) chown(DNSMASQ_LEASES, 0, g->gr_gid);
+        chmod(DNSMASQ_LEASES, 0664);
+    }
+    fprintf(stderr, "dhcpprune: dropped %d unreserved lease(s)\n", dropped);
+
+    start_dnsmasq();
     return 0;
 }
 
@@ -1679,6 +1788,9 @@ int main(int argc, char *argv[])
 
     } else if (strcmp(cmd, "dhcpreload") == 0) {
         rc = do_dhcpreload();
+
+    } else if (strcmp(cmd, "dhcpprune") == 0) {
+        rc = do_dhcpprune();
 
     } else if (strcmp(cmd, "pffwd") == 0) {
         if (argc != 3)

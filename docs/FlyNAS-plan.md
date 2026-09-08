@@ -1062,14 +1062,31 @@ any app work. If cloud-init fights on Alpine, fall back per the caveat above.
     stale duplicates until someone happens to touch a VM. Tested by putting the
     box back into the broken state and restarting.
 
-    **Known gap in that repair:** rewriting the MAC of a VM that is *running*
-    strands it. dnsmasq still holds the old MAC's 12h lease on the reserved
-    address, so the guest comes back on its new MAC, finds the address taken
-    and gets nothing — observed on forge1. Recovering means pruning leases
-    whose MAC is no longer in the hostsfile and restarting dnsmasq (SIGHUP
-    does not reload leases), then restarting the VM. The migration should do
-    that pruning itself; it does not yet. Only bites installs that predate the
-    id-derived MAC, and only for VMs running at the moment of the upgrade.
+    **The repair now prunes stale leases too (fixed same day).** Rewriting a
+    MAC under a live lease stranded the VM it had just fixed: dnsmasq keeps the
+    old MAC's 12h lease on the reserved address, so the guest returns on its
+    new MAC, finds the address taken and gets nothing. Its own log said so
+    outright — `not using configured address 10.77.0.101 because it is leased
+    to 52:54:00:cb:b2:97`. SIGHUP cannot fix it (dnsmasq re-reads reservations
+    on HUP, never the lease file), so there is a new helper verb `dhcpprune`:
+    stop dnsmasq, drop leases whose MAC is no longer in the hostsfile, restart.
+    Leases that are still reserved are kept, so unaffected guests do not have
+    to re-DHCP. The migration calls it after `sync_dhcp`. Verified by putting
+    the box back into the broken state — duplicate MACs *and* a stale lease —
+    and restarting: MACs repaired, hostsfile resynced, stale lease dropped, and
+    forge1 then took its reserved `.101` on the new MAC.
+
+  - **dnsmasq could not read its own reservations — a latent bug this
+    surfaced.** `flynas-helper.c` chmods `/var/run/flynas` to `02770` on VM
+    create, but dnsmasq drops privileges to `nobody`, which then cannot
+    traverse the directory: `cannot read /var/run/flynas/dhcp-hosts: Permission
+    denied`, one line, and no reservations served. It went unnoticed because
+    dnsmasq reads the file at startup, when the directory is still loose — any
+    later SIGHUP or restart silently lost the reservations. Fixed with
+    `group=flynas` in `conf/dnsmasq.conf`, so it stays unprivileged but can get
+    in; the run dir stays 2770 because the VM sockets in it should be
+    group-only. `dhcpprune` also hands the lease file back to `root:flynas`
+    0664 after rewriting it as root, or dnsmasq could not write it afterwards.
   - **VaultWarden needs an email; FlyNAS does not reliably have one.**
     `oidc.lua:119` emits the `email` claim only when the user *has* an email,
     and `/api/setup` creates the admin with none. Forgejo tolerates that;
