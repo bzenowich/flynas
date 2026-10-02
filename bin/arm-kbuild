@@ -28,9 +28,15 @@ OBJ="$REPO/tools/kobj/$conf"
 # the cross toolchain.  ld.lld in tools/lld finds its own libLLVM via rpath.
 TB="$REPO/tools/host/xbin"
 mkdir -p "$TB"
+# clang-18 knows no aarch64-*-dragonfly OS target, so the bare-metal triple
+# is used and the predefines a native DragonFly compiler would supply are
+# added by hand.  The bare-metal driver also ignores -shared (kern.post.mk
+# links hack.So with it), so pass that through to the linker explicitly.
 cat > "$TB/cc" <<EOF
 #!/bin/sh
-exec clang-18 --target=aarch64-unknown-none-elf -fuse-ld=$LLD "\$@"
+case " \$* " in *" -shared "*) set -- "\$@" -Wl,-shared ;; esac
+exec clang-18 --target=aarch64-unknown-none-elf -fuse-ld=$LLD \\
+    -D__DragonFly__=1 -D__unix__=1 -D__unix=1 "\$@"
 EOF
 ln -sf "$LLD" "$TB/ld"
 for t in nm objcopy objdump size readelf ar strip; do ln -sf "$(command -v llvm-$t-18)" "$TB/$t"; done

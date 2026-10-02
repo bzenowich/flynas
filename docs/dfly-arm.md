@@ -1,6 +1,7 @@
 # DragonFly BSD on arm64 — FlyNAS on Raspberry Pi 4 Model B
 
-Status: **plan only** (2026-10-01). No code exists yet.
+Status: **Phase 1 done** (2026-10-02). The kernel boots on QEMU `virt` to
+the copyright banner and panics in the first VM sysinit. Phase 2 is next.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -447,6 +448,70 @@ to do, at low priority (`nice`, one job).
 
 **Exit:** QEMU `virt` prints the DragonFly copyright banner, then panics in
 `mi_startup` somewhere sensible.
+
+- **Done 2026-10-02.** Four commits on `arm64`:
+
+  | Commit | Contents |
+  |---|---|
+  | `ecf2d6a6b9` | MI: `EM_AARCH64` (was the unused `EM_res183`), aarch64 `LABELSECTOR32` |
+  | `5dab66e839` | libfdt imported from FreeBSD into `sys/libfdt` (plus `fdt_memchr`) |
+  | `67b8900581` | The `cpu/aarch64/include` and `platform/arm64/include` headers, enough for every MI source in ARM64_VIRT to compile |
+  | `3cf8ca66bc` | Boot code: `locore.s`, `exception.S`, `hyp_stub.S`, `machdep.c` (`initarm`), `fdt_early.c`, `early_uart.c` (PL011), `support.c`, `swtch.s` (`savectx` only), `trap.c`, `stubs.c`, the Image linker script and the `kernel.bin` target |
+
+- **What boots:**
+
+  ```
+  aarch64: entered at EL1, kernel at pa 0x40200000, DTB at pa 0x48000000
+  aarch64: linux,dummy-virt
+  aarch64: console uart at pa 0x9000000
+  aarch64: 1024 MB memory at pa 0x40000000
+  Copyright (c) 2003-2026 The DragonFly Project.
+  ...
+  panic: pmap_map: not yet
+  ```
+
+  It also boots when entered at EL2 (`ARM_VM_MACHINE=virt,gic-version=2,virtualization=on`):
+  the hyp stub is installed and the kernel drops to EL1. A test `brk` from `initarm`
+  went through the vectors and printed ESR, ELR and all registers.
+
+- **Design as built:**
+  - **Boot page tables.** Six pages in a `.boot_pt` section after BSS, so
+    clearing BSS doesn't wipe them.
+    - TTBR0: 1GB identity blocks for the gigabytes holding the kernel and the DTB.
+    - TTBR1: KERNBASE mapped to the load address in 2MB blocks, plus 8 blocks of slack.
+    - The L1 slot after KERNBASE's (0xffffffffc0000000) holds an
+      initially empty L2 table. `early_devmap()` fills it with 2MB
+      Device-nGnRE blocks; the UART is mapped there.
+  - **MAIR.** Index 0 is Device-nGnRnE, 1 is Normal NC, 2 is Normal WB, 3 is Normal WT and 4 is
+    Device-nGnRE. The x86 `PAT_*` names map onto these in `<machine/pat.h>`.
+  - **`initarm()`.** Mirrors `hammer_time()`:
+    - Sets up globaldata, with TPIDR_EL1 pointing at it.
+    - Parses the FDT: `/chosen/bootargs` gives `-s`/`-v`/... as `boothowto` and
+      `name=value` pairs as `kern_envp`. The UART comes from `stdout-path`,
+      with bus `ranges` translation for the Pi.
+    - `init_param1`, `mi_gdinit`, `cpu_gdinit`, `mi_proc0init`, `init_locks`, `cninit`.
+    - Sets `physmem` from `/memory`, then `init_param2`, then the message buffer, which is
+      static in the image for now.
+  - **Stubs.** `stubs.c` holds 131 MD symbols, each of which panics with its name. They are grouped by the
+    file that will replace them (pmap, user copy, bus_dma, switch,
+    signals/ptrace, SMP, interrupts, RTC, kernel linker, dumps).
+  - **DDB is off in ARM64_VIRT** until `db_interface.c`, `db_trace.c` and `setjmp`
+    exist. `machdep.c` has a non-DDB `Debugger()`, because HAMMER2 calls it
+    unconditionally.
+  - **After a panic.** `boot()` spins in its `for(;;)` because the shutdown handlers
+    register in a sysinit after VM init. The VM sits there until the `arm-vm` timeout.
+    `cpu_reset()` halts; PSCI reset comes later.
+- **Tooling changes:**
+  - The `arm-kbuild` cc wrapper passes `-Wl,-shared` when it sees
+    `-shared`, because the bare-metal clang driver drops it and `hack.So` came out as an
+    executable.
+  - `genassym.sh` works unchanged with llvm-nm.
+  - `arm-kbuild` always wipes the objdir. For incremental work, run bmake in
+    `tools/kobj/ARM64_VIRT` with the same variables, and rerun config(8) into
+    that directory without the `rm`.
+- **Not done:** an x86_64 rebuild in h2dev for the two MI header changes.
+  Both are preprocessor-only and inert on x86: the disklabel32 condition is
+  unchanged for x86, and `EM_res183` had no users. Run it before upstreaming.
 
 ### Phase 2 — pmap, exceptions, timer, interrupts: single CPU to `init` (≈8–12 wk)
 
@@ -945,7 +1010,8 @@ DragonFly hardware.
    `bin/vm` / h2dev.
 3. Write `bin/arm-vm` (QEMU `virt` + gdb) and the clang/lld kernel build
    wrapper.
-4. Do Phase 1: headers, `locore.S`, PL011 early console, banner on QEMU.
+4. ~~Do Phase 1: headers, `locore.S`, PL011 early console, banner on QEMU.~~
+   Done 2026-10-02 (see Phase 1). Next is Phase 2, starting with `pmap_bootstrap`.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
