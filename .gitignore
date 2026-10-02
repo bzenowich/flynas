@@ -5,3 +5,5 @@ tools/*
 !tools/uitest/
 tools/uitest/node_modules/
 ui/reference/
+!tools/arm-smoke/
+logs/

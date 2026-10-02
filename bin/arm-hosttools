@@ -1,0 +1,52 @@
+#!/bin/sh
+# Build the DragonFly host tools the aarch64 kernel cross-build needs on a
+# Linux host, from the fork's own sources (../dragonfly), into tools/host/bin:
+#
+#   bmake   contrib/bmake  (DragonFly's make; its configure script is stripped
+#           in-tree, so it is compiled directly with usr.bin/bmake's defines)
+#   config  usr.sbin/config (config(8); needs bison/flex, yywrap stub for -ll)
+#   mkdep   usr.bin/mkdep/mkdep.sh
+#
+#   bin/arm-hosttools          build (re-run after pulling upstream)
+#   bin/arm-hosttools --clean  remove tools/host
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
+OUT="$REPO/tools/host"
+BIN="$OUT/bin"
+
+if [ "${1:-}" = "--clean" ]; then rm -rf "$OUT"; exit 0; fi
+mkdir -p "$BIN" "$OUT/build/config"
+CC="${HOSTCC:-cc}"
+
+# --- bmake -----------------------------------------------------------------
+b="$SRC/contrib/bmake"
+ver=$(sed -n 's/^_MAKE_VERSION=//p' "$b/VERSION")
+dver=$(awk '/^#define[[:blank:]]__DragonFly_version/ {print $3}' "$SRC/sys/sys/param.h")
+osrel=$(echo "$dver" | awk '{a=int($1/100000); b=int(($1-(a*100000))/100); print a "." b}')
+echo "==> bmake $ver (DragonFly $dver)"
+(cd "$b" && $CC -O2 -w -I"$SRC/usr.bin/bmake" -I. \
+    -DHAVE_CONFIG_H -DNO_PWD_OVERRIDE -DUSE_META -D_GNU_SOURCE \
+    -DMAKE_VERSION="\"$ver\"" -D_PATH_DEFSYSPATH="\"$SRC/share/mk\"" \
+    -DDFVER="\"$dver\"" -DOSREL="\"$osrel\"" \
+    arch.c buf.c compat.c cond.c dir.c for.c hash.c job.c lst.c main.c \
+    make.c make_malloc.c meta.c metachar.c parse.c str.c suff.c targ.c \
+    trace.c util.c var.c stresep.c -o "$BIN/bmake")
+
+# --- config(8) -------------------------------------------------------------
+c="$SRC/usr.sbin/config"
+o="$OUT/build/config"
+echo "==> config"
+bison -y -d -o "$o/y.tab.c" "$c/config.y"
+flex -o "$o/lang.c" "$c/lang.l"
+echo 'int yywrap(void) { return 1; }' > "$o/yywrap.c"	# what -ll provides on BSD
+$CC -O2 -w -D_GNU_SOURCE -I"$o" -I"$c" "$o/y.tab.c" "$o/lang.c" "$o/yywrap.c" \
+    "$c/main.c" "$c/mkheaders.c" "$c/mkioconf.c" "$c/mkmakefile.c" "$c/mkoptions.c" \
+    -o "$BIN/config"
+
+# --- mkdep -----------------------------------------------------------------
+echo "==> mkdep"
+install -m 755 "$SRC/usr.bin/mkdep/mkdep.sh" "$BIN/mkdep"
+
+echo "==> host tools in $BIN:"
+ls "$BIN"

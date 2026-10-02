@@ -1,0 +1,54 @@
+#!/bin/sh
+# Cross-build the aarch64 DragonFly kernel on the Linux host.
+#
+#   bin/arm-kbuild [KERNCONF] [make targets...]    default: ARM64_VIRT, "depend all"
+#   bin/arm-kbuild ARM64_VIRT -k all               keep going, to list every failure
+#   bin/arm-kbuild --config-only [KERNCONF]        just run config(8)
+#
+# Toolchain: host clang-18 (--target=aarch64-unknown-none-elf, integrated
+# assembler) and dfly/tools/lld ld.lld-18.  Host tools (bmake, config, mkdep)
+# come from bin/arm-hosttools, built from the fork itself.  Objects land in
+# tools/kobj/<KERNCONF>; the fork's tree is never written to.
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
+HOSTBIN="$REPO/tools/host/bin"
+LLD="$REPO/tools/lld/usr/bin/ld.lld-18"
+
+config_only=0
+if [ "${1:-}" = "--config-only" ]; then config_only=1; shift; fi
+conf="${1:-ARM64_VIRT}"; [ $# -gt 0 ] && shift
+targets="${*:-depend all}"
+OBJ="$REPO/tools/kobj/$conf"
+
+[ -x "$HOSTBIN/bmake" ] || "$REPO/bin/arm-hosttools"
+[ -x "$LLD" ] || { echo "missing $LLD" >&2; exit 1; }
+
+# Wrapper dir: names the kernel makefiles call bare (cc, ld, nm, ...) map to
+# the cross toolchain.  ld.lld in tools/lld finds its own libLLVM via rpath.
+TB="$REPO/tools/host/xbin"
+mkdir -p "$TB"
+cat > "$TB/cc" <<EOF
+#!/bin/sh
+exec clang-18 --target=aarch64-unknown-none-elf -fuse-ld=$LLD "\$@"
+EOF
+ln -sf "$LLD" "$TB/ld"
+for t in nm objcopy objdump size readelf ar strip; do ln -sf "$(command -v llvm-$t-18)" "$TB/$t"; done
+chmod +x "$TB/cc"
+export PATH="$TB:$HOSTBIN:$PATH"
+
+echo "==> config $conf -> $OBJ"
+rm -rf "$OBJ"; mkdir -p "$OBJ"
+(cd "$SRC/sys/config" && config -d "$OBJ" "$conf")
+[ $config_only -eq 1 ] && exit 0
+
+# MACHINE*: the target, not the host.  CCVER names an external compiler
+# (bsd.cpu.custom.mk); it must not match clang* or kern.pre.mk adds
+# -no-integrated-as, and there is no GNU as for aarch64 here.
+cd "$OBJ"
+exec bmake -m "$SRC/share/mk" \
+    MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
+    CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
+    CC=cc LD=ld NM=nm OBJCOPY=objcopy OBJDUMP=objdump SIZE=size \
+    NO_MODULES=yes \
+    $targets

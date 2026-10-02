@@ -1,0 +1,92 @@
+#!/bin/sh
+# Build the arm64-port fork (../dragonfly) as an x86_64 kernel inside h2dev,
+# to prove that machine-independent changes made for the port do not break
+# x86_64. The arm64 port itself is cross-built on the Linux host (bin/arm-kbuild).
+#
+#   bin/arm-x86build sync               rsync the fork's working tree -> h2dev:/build/dragonfly
+#   bin/arm-x86build build [KERNCONF]   sync + `make nativekernel` (default X86_64_GENERIC)
+#   bin/arm-x86build quick [KERNCONF]   sync + `make quickkernel` (no clean, no re-config of objs)
+#   bin/arm-x86build install [KERNCONF] install as /boot/kernel.arm64mi (the running kernel is untouched)
+#   bin/arm-x86build boottest           snapshot, boot kernel.arm64mi once, report, boot back to stock
+#   bin/arm-x86build log                tail the last build log
+#
+# The guest's own /usr/src and /boot/kernel are never touched.
+#
+# Selecting the test kernel: dloader builds its menu from
+# defaults/dloader.menu BEFORE it reads loader.conf, expanding
+# ${default_kernel} as it goes, so neither kernel= nor default_kernel= in
+# loader.conf has any effect.  boottest instead prepends
+# `set default_kernel=kernel.arm64mi` to /boot/dloader.rc for one boot and
+# restores it afterwards.  It takes a QMP snapshot (pre-arm64mi) first, so
+# a kernel that does not come up is undone with
+#   ../hammer2-raid6/bin/qmp human-monitor-command '{"command-line":"loadvm pre-arm64mi"}'
+#
+# Builds use the guest's native gcc 8.3 (nativekernel), objects land in
+# /build/obj, logs in /build/logs/.  Parallelism defaults to -j2 (ARM_X86_JOBS)
+# because a full-core build in the VM overheats the host.
+set -e
+. "$(dirname "$0")/_common.sh"
+
+SRC="${DFLY_SRC:-$REPO/../dragonfly}"
+SRC="$(cd "$SRC" && pwd)"
+RSRC=/build/dragonfly
+ROBJ=/build/obj
+RLOG=/build/logs
+LABEL=arm64mi
+
+cmd="${1:-build}"
+conf="${2:-X86_64_GENERIC}"
+
+sync_src() {
+    echo "==> rsync $SRC -> $VM_TARGET:$RSRC ($(git -C "$SRC" rev-parse --short HEAD) on $(git -C "$SRC" branch --show-current))"
+    rsh "mkdir -p $RSRC $ROBJ $RLOG"
+    rsync -a --delete --exclude=.git -e "$VM_RSYNC_RSH" "$SRC/" "$VM_TARGET:$RSRC/"
+}
+
+wait_ssh() {
+    sleep 30
+    for _ in $(seq 1 60); do
+        vssh -o ConnectTimeout=5 -o BatchMode=yes true 2>/dev/null && return 0
+        sleep 10
+    done
+    echo "arm-x86build: no ssh after 10 minutes; check ../hammer2-raid6/logs/console.log" >&2
+    return 1
+}
+
+reboot_vm() {
+    rsh 'sync; (sleep 2; shutdown -r now) >/dev/null 2>&1 &'
+    wait_ssh
+}
+
+boottest() {
+    echo "==> snapshot pre-arm64mi"
+    "$H2/bin/qmp" human-monitor-command '{"command-line":"savevm pre-arm64mi"}'
+    echo "==> boot /boot/kernel.$LABEL once"
+    rsh "test -f /boot/kernel.$LABEL/kernel && cp /boot/dloader.rc /boot/dloader.rc.pre-$LABEL && \
+        { echo 'set default_kernel=kernel.$LABEL'; cat /boot/dloader.rc.pre-$LABEL; } > /boot/dloader.rc"
+    reboot_vm
+    rsh "mv /boot/dloader.rc.pre-$LABEL /boot/dloader.rc"	# next boot is stock again
+    rsh 'echo "booted: $(sysctl -n kern.bootfile)"; uname -v; dmesg | grep -iE "panic|lock order|witness" | head'
+    echo "==> back to the stock kernel"
+    reboot_vm
+    rsh 'echo "booted: $(sysctl -n kern.bootfile)"'
+}
+
+run_make() {
+    target="$1"
+    log="$RLOG/$(date +%Y%m%d-%H%M%S)-$target-$conf.log"
+    echo "==> make $target KERNCONF=$conf (log: $log)"
+    rsh "cd $RSRC && ln -sf $log $RLOG/last.log && \
+        MAKEOBJDIRPREFIX=$ROBJ make -j${ARM_X86_JOBS:-2} ${ARM_X86_MAKEARGS:-} $target KERNCONF=$conf \
+            > $log 2>&1; rc=\$?; tail -5 $log; exit \$rc"
+}
+
+case "$cmd" in
+    sync)    sync_src ;;
+    build)   sync_src; run_make nativekernel ;;
+    quick)   sync_src; run_make quickkernel ;;
+    install) rsh "cd $RSRC && MAKEOBJDIRPREFIX=$ROBJ make installkernel KERNCONF=$conf DESTLABEL=$LABEL ${ARM_X86_MAKEARGS:-} 2>&1 | tail -3 && ls -l /boot/kernel.$LABEL/kernel" ;;
+    boottest) boottest ;;
+    log)     rsh "tail -40 $RLOG/last.log" ;;
+    *) echo "usage: bin/arm-x86build {sync|build|quick|install|boottest|log} [KERNCONF]" >&2; exit 2 ;;
+esac
