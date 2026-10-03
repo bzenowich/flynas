@@ -1,0 +1,21 @@
+# vmexpect.py script for run-virtio.sh (@PORT@ and @SUM@ are filled in):
+# root on vbd0, DHCP on vtnet0, a fetch from the host, a second disk.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send mount | grep -c '^/dev/vbd0 on / (ufs, local)' | sed 's/^/MO''UNT /'\r
+expect MOUNT 1
+send ifconfig vtnet0 | awk '$1 == "inet" { print "LEA" "SE", $2 }'\r
+expect LEASE 10.0.2.15
+send fetch -q -o - http://10.0.2.2:@PORT@/blob | sha256 | sed 's/^/SU''M /'\r
+expect SUM @SUM@
+send dd if=/dev/random of=/tmp/p bs=1m count=8 2>/dev/null; dd if=/tmp/p of=/dev/vbd1 bs=1m 2>/dev/null; dd if=/dev/vbd1 bs=1m count=8 2>/dev/null | cmp - /tmp/p && echo "DIS""K ok"\r
+expect DISK ok
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

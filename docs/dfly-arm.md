@@ -15,7 +15,9 @@ of `make -j8` plus dltest loops on 4 cpus). **Phase 4 is done**
 (2026-10-03): the world builds from clean on the Linux host, installs into
 a UFS image, and boots on QEMU to multi-user with rc, getty, devd and
 sshd. libc++ and libcxxrt (from FreeBSD) give aarch64 its C++ runtime
-(see Progress 4c). Next: Phase 5.
+(see Progress 4c). **Phase 5 has started:** newbus is built from the
+DTB, and the installed world boots from a virtio-mmio disk with a
+virtio-mmio NIC (see Progress 5a). Next: PCIe ECAM (5b).
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1316,6 +1318,72 @@ with `sshd`.
 qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
 `../hammer2-raid6/tests` on four virtual disks in the guest, and it passes.
 
+#### Progress 5a: FDT newbus and virtio-mmio (2026-10-03)
+
+- **The newbus tree comes from the DTB.** On QEMU `virt` the installed
+  world boots with root on a virtio-mmio disk, gets a DHCP lease on
+  `vtnet0` and fetches a file from the host intact, on 1 and 2 CPUs (fork
+  `00bba6225d`, `47b19fd616`).
+  - `tools/arm-smoke/run-virtio.sh WORK`, `virtio.exp`, 17/17 steps:
+    - root on `vbd0`;
+    - lease `10.0.2.15` from QEMU's user network;
+    - 4 MB fetched from a web server on the host, sha256 checked;
+    - 8 MB written to and read back from a second virtio disk.
+  - `run-multiuser.sh` (md root) still passes 25/25.
+- **`sys/bus/ofw`, from FreeBSD, FDT only:**
+  - `openfirm.c` merges `openfirm.c` and `ofw_fdt.c`. It calls libfdt
+    directly, so there is no `ofw_if` kobj backend. A phandle is a node
+    offset.
+  - The xref list is under a spinlock.
+  - `OF_init(fdt_va())` runs at `SI_BOOT1_POST`.
+  - `ofw_bus_subr.c`, `ofw_bus_if.m` and `ofwbus.c` are adapted to
+    DragonFly newbus:
+    - rid by pointer;
+    - an IRQ resource carries its cpu (`machintr_legacy_intr_cpuid`);
+    - no `BUS_PASS`, since the GIC and timer are already up by SYSINIT.
+  - DragonFly's `kfree(NULL)` panics, so property buffers are freed
+    through the NULL-safe `OF_prop_free()`.
+- **`sys/bus/fdt/simplebus.c`:**
+  - FreeBSD's version, minus the MSI and `get_property` methods.
+  - `reg` is translated through `ranges`.
+  - `ofwbus` is `DEFINE_CLASS_1` of it.
+- **`platform/arm64/aarch64/nexus.c`,** from the x86_64 nexus:
+  - per-cpu irq rmans set up by the GIC's `MachIntrABI.rman_setup`;
+  - memory resources mapped with `pmap_mapdev()` (Device-nGnRE);
+  - one child, `ofwbus0`.
+  - Interrupts: no INTRNG. `ofw_bus_map_intr()` propagates up to nexus,
+    which maps the GIC's 3-cell SPI/PPI specifier to an MI irq
+    (INTID − 16) and programs the trigger mode.
+- **`autoconf.c`:** `root_bus_configure()` at `SI_SUB_CONFIGURE`. After
+  it, `safepri` drops to `TDPRI_KERN_USER`, as on x86.
+- **virtio-mmio:**
+  - Upstream's legacy (v1) transport (`116009a77f`) gets an FDT
+    attachment, `virtio_mmio_fdt.c` (`"virtio,mmio"`).
+  - MI: `virtio_blk` and `vtnet` register on `virtio_mmio` as well as
+    `virtio_pci`. Upstream had the transport but no driver attached to it.
+  - QEMU fills the 32 slots from the top, and they attach from the
+    bottom, so the last `-device` is unit 0.
+  - `bin/arm-vm` takes extra QEMU arguments in `ARM_VM_ARGS`.
+- Smaller fixes:
+  - `support.c` gains `_bcopy` and friends (bpf).
+  - `ARM64_VIRT` gets `bpf`, `virtio`, `virtio_mmio`, `virtio_blk` and
+    `vtnet`.
+- **Known: the contigmalloc DMA reserve is empty on `virt`.**
+  - `vm_page_startup` reserves physical pages below 256 MB (absolute PFNs
+    0–65535), and `virt`'s RAM starts at 1 GB.
+  - So every `contigmalloc` falls back to the general scan, which works.
+    Under `-v` each fallback prints a `nospace` backtrace.
+  - The Pi 4 has RAM at 0, and its DMA engines want low memory, so fix
+    this with busdma (5c): base the reserve on `phys_avail[0]`.
+- **x86 check pending:** the only MI change so far is the two
+  `DRIVER_MODULE` lines. It goes to h2dev together with 5b's `bus/pci`
+  work.
+- Next:
+  - 5b: `pci_host_generic` (ECAM), with INTx through `interrupt-map` and
+    MSI through GICv2m, for virtio-pci, AHCI and xhci.
+  - 5c: busdma with cache maintenance.
+  - 5d: AHCI, xhci + umass, then the RAID6 suite on 4 disks.
+
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
 Order matters: console, then SD, then USB, then network.
@@ -1684,8 +1752,8 @@ DragonFly hardware.
      Progress 4b).
    - Phase 4 is done (Progress 4c): buildworld from clean,
      installworld into a UFS image, and a multi-user boot with sshd.
-     Next: Phase 5 (FDT, newbus, virtio-net on QEMU, so sshd can be
-     reached from outside).
+   - Phase 5a is done (Progress 5a): FDT newbus, virtio-mmio disk and
+     NIC. Next: 5b, PCIe ECAM.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
