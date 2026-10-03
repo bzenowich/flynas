@@ -1092,7 +1092,15 @@ with `sshd`.
     before the include-order and atomics changes are stale.
   - The rest of world (`bin`, `sbin`, `usr.*`), then the Phase 3 exit test
     under load.
-  - An x86 check of the MI changes: `bin/arm-x86build`.
+  - x86 check, done 2026-10-03 at fork `1496798ba5`:
+    - `bin/arm-x86build build` + `boottest`: the x86_64 kernel builds
+      and boots.
+    - In h2dev, gcc 8.3 `-Werror` compiles every object of
+      `libexec/rtld-elf`, `lib/libevtr` and `lib/liblzma`.
+    - `float.h` passes static asserts against gcc's x86 predefines.
+    - The rtld link (`-lc_rtld_pic`) and `libkvm` (master's
+      `machine/pat.h`) need a master buildworld, which the 6.4 guest
+      doesn't have. Recheck them with the first full x86 buildworld.
 
 ### Phase 5 — FDT, newbus and generic devices (≈3–5 wk)
 
