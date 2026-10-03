@@ -1,0 +1,17 @@
+# vmexpect.py script for run-load.sh: the Phase 3 exit test under load.
+# tmpfs on /tmp; ROUNDS rounds of make -r -j8 over load.mk (16 jobs of
+# awk/sort/gzip/cmp each) while two dltest loops of NDL runs each go on
+# in parallel.  Each part writes its result to /tmp; one line sums them
+# up at the end.  Markers are split in the commands so the echoed command
+# lines cannot match.  run-load.sh fills in @ROUNDS@ and @NDL@.
+expect Enter full pathname of shell or RETURN for /bin/sh:
+send \r
+expect #
+send mount_tmpfs tmpfs /tmp && echo "TMP""FS ok"\r
+expect TMPFS ok
+send L() { i=0; h=0; while [ $i -lt $2 ]; do /bin/dltest > /dev/null & p=$!; n=0; while kill -0 $p 2>/dev/null && [ $n -lt 30 ]; do sleep 1; n=$((n+1)); done; if [ $n -ge 30 ]; then echo "HU""NG $1 it $i"; h=$((h+1)); kill -9 $p; fi; wait $p; i=$((i+1)); done; echo "$h" > /tmp/L$1; }\r
+expect #
+send D() { r=0; f=0; while [ $r -lt $1 ]; do if make -r -j8 -f /root/load.mk R=$r > /tmp/mk.log 2>&1; then echo "ROU""ND $r ok $(date +%T)"; else f=$((f+1)); echo "ROU""ND $r FAILED"; tail -5 /tmp/mk.log; fi; r=$((r+1)); done; echo "$f" > /tmp/D; }\r
+expect #
+send L a @NDL@ & L b @NDL@ & D @ROUNDS@; wait; echo "RES""ULT make-fail=$(cat /tmp/D) hung-a=$(cat /tmp/La) hung-b=$(cat /tmp/Lb)"\r
+expect RESULT make-fail=0 hung-a=0 hung-b=0

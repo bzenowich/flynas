@@ -14,7 +14,7 @@ file lists from the makefiles themselves (bmake -V) so they cannot drift:
   machine/ = cpu/ overlaid with sys/platform/arm64/include
   every lib/*/Makefile that sets INCS (all INCSGROUPS)
 
-rpc/ and rpcsvc/ HDRS are rpcgen output; the host's rpcgen generates them.
+rpc/ and rpcsvc/ HDRS are rpcgen output, from the fork's rpcgen (bin/arm-hosttools).
 Files are only rewritten when their contents change, so incremental userland
 builds are not invalidated by a re-stage.
 """
@@ -130,7 +130,7 @@ def rpc_incs(sd, d):
         x = h[:-2] + ".x"
         if h == "nis.h":
             x = "nis.x"
-        out = subprocess.run(["rpcgen", "-C", "-h", "-DWANT_NFS3", x],
+        out = subprocess.run([os.path.join(HOSTBIN, "rpcgen"), "-C", "-h", "-DWANT_NFS3", x],
                              cwd=sd, capture_output=True, text=True)
         if out.returncode != 0:
             print("  include/%s: rpcgen %s failed, skipped:\n%s" % (d, x, out.stderr))

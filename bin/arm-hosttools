@@ -6,6 +6,9 @@
 #           in-tree, so it is compiled directly with usr.bin/bmake's defines)
 #   config  usr.sbin/config (config(8); needs bison/flex, yywrap stub for -ll)
 #   mkdep   usr.bin/mkdep/mkdep.sh
+#   yacc    usr.bin/yacc (byacc; bison -y places %{ %} prologues differently)
+#   rpcgen  usr.bin/rpcgen
+#   unifdef usr.bin/unifdef (libexpat's bsdxml.h)
 #   gencat  usr.bin/gencat (BSD catalog format, big endian; glibc's gencat
 #           writes its own incompatible format)
 #
@@ -50,15 +53,47 @@ $CC -O2 -w -D_GNU_SOURCE -I"$o" -I"$c" "$o/y.tab.c" "$o/lang.c" "$o/yywrap.c" \
 echo "==> mkdep"
 install -m 755 "$SRC/usr.bin/mkdep/mkdep.sh" "$BIN/mkdep"
 
+# --- yacc (byacc) -----------------------------------------------------------
+y="$SRC/contrib/byacc"
+echo "==> yacc"
+(cd "$y" && $CC -O2 -w -D_GNU_SOURCE -DHAVE_CONFIG_H -I"$SRC/usr.bin/yacc" \
+    -DYYPATCH="$(cat VERSION)" -DMAXTABLE=65000 closure.c error.c graph.c \
+    lalr.c lr0.c main.c mkpar.c mstring.c output.c reader.c symtab.c \
+    verbose.c warshall.c yaccpar.c -o "$BIN/yacc")
+ln -sf yacc "$BIN/byacc"
+
+# The <sys/cdefs.h> and libc bits small BSD tools use that glibc lacks.
+cat > "$OUT/build/hostcompat.h" <<'EOF2'
+#include <errno.h>
+#define	__dead2		__attribute__((__noreturn__))
+#define	__printflike(f, a) __attribute__((__format__(__printf__, f, a)))
+#define	getprogname()	program_invocation_short_name
+#define	__unused	__attribute__((__unused__))
+#define	NELEM(ary)	(sizeof(ary) / sizeof((ary)[0]))
+EOF2
+HCC="$CC -O2 -w -D_GNU_SOURCE -include $OUT/build/hostcompat.h"
+
 # --- gencat ----------------------------------------------------------------
 # Needs DragonFly's <nl_types.h> for the _NLS_PRIVATE catalog layout.
 g="$OUT/build/gencat"
 echo "==> gencat"
 mkdir -p "$g"
 sed 's|<machine/stdint.h>|<stdint.h>|' "$SRC/include/nl_types.h" > "$g/nl_types.h"
-$CC -O2 -w -D_GNU_SOURCE -include errno.h '-D__dead2=__attribute__((__noreturn__))' \
-    '-Dgetprogname()=program_invocation_short_name' -I"$g" \
-    "$SRC/usr.bin/gencat/gencat.c" -o "$BIN/gencat"
+$HCC -I"$g" "$SRC/usr.bin/gencat/gencat.c" -o "$BIN/gencat"
+
+# --- rpcgen ----------------------------------------------------------------
+# glibc's rpcgen names -m dispatchers and #includes differently.  It needs
+# only bool_t from <rpc/types.h> (glibc has no Sun RPC headers any more).
+r="$OUT/build/rpcgen"
+echo "==> rpcgen"
+mkdir -p "$r/rpc"
+printf '#include <stdint.h>\ntypedef int32_t bool_t;\n#define\tTRUE\t1\n#define\tFALSE\t0\n' \
+    > "$r/rpc/types.h"
+$HCC -I"$r" "$SRC"/usr.bin/rpcgen/*.c -o "$BIN/rpcgen"
+
+# --- unifdef ---------------------------------------------------------------
+echo "==> unifdef"
+$HCC -I"$SRC/usr.bin/unifdef" "$SRC/usr.bin/unifdef/unifdef.c" -o "$BIN/unifdef"
 
 echo "==> host tools in $BIN:"
 ls "$BIN"

@@ -2,14 +2,17 @@
 
 Status: **Phase 3 (SMP) is working** (2026-10-02). On QEMU `virt`, `-smp 1`,
 `2` and `4` boot to a static aarch64 `/sbin/init` from an md root, and a
-boot-time SMP stress test passes on 4 CPUs. The literal Phase 3 exit test
-(hours of `make -j8`) waits for userland. Signals, a W^X kernel image, DMAP
+boot-time SMP stress test passes on 4 CPUs; the Phase 3 exit test under
+load passed on 2026-10-03 (see Progress 4b). Signals, a W^X kernel image, DMAP
 memory attributes and kernel module loading are done too (see Phase 2).
 The console is a real PL011 tty, and **Phase 4a works**: a cross-built
 static `init` drops to single-user and runs a static `/bin/sh`
 interactively (see Phase 4, Progress). In 4b, libm, rtld and shared
 libc/libm work (2026-10-03, dynamic programs with shared-library TLS and
-dlopen pass on QEMU). Next: the rest of world.
+dlopen pass on QEMU). **4b is done** (2026-10-03): the whole world except
+`devd` cross-builds, and the Phase 3 exit test passed under load (1.5 h
+of `make -j8` plus dltest loops on 4 cpus). Next: a multi-user boot, then
+Phase 5.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -799,7 +802,8 @@ static ELF that does a `write` syscall and `exit`.
     `pmap_kenter`s one VA over 4 pages under an exclusive spinlock, and the
     others read it under a shared one. All counts are checked at the end.
 - **Still open:**
-  - The literal exit test (hours of `make -j8`) needs Phase 4 userland.
+  - ~~The literal exit test (hours of `make -j8`).~~ Passed 2026-10-03
+    on the cross-built world (see Progress 4b).
   - The ASID rollover path is not exercised yet (one user process).
   - The spin-table path is untested until the Pi.
   - All SPIs still go to cpu 0.
@@ -1113,9 +1117,63 @@ with `sshd`.
   - x86_64 output is unchanged.
   - See `tools/llvm/README.md`. The `cc` shim stays until a patched clang
     is installed.
+- **The rest of world (fork `8906778a65`):**
+  - Everything in `bin`, `sbin`, `libexec`, `usr.bin`, `usr.sbin`,
+    `gnu/lib`, `gnu/sbin` and `gnu/usr.bin` cross-builds and installs
+    into the sysroot (dynamic, `ARM_SHARED=1`), except `sbin/devd`.
+  - `devd` is the only C++ program in base. It waits for a libc++ and
+    libcxxrt import (FreeBSD's vendored copies), which a native toolchain
+    needs anyway.
+  - Left out on aarch64 because they are x86-only: `cpucontrol`,
+    `fdcontrol`, `fdformat`, `fdwrite`, `kbdcontrol`, `lptcontrol`,
+    `moused`, `mptable`, `nvmmctl`, `rndcontrol`, `vidcontrol`, and the
+    NVMM headers. Also left out: gdb, binutils, gmp/mpfr/mpc and
+    cc80/cc120, because the toolchain is external clang.
+  - Code changes:
+    - truss gets `aarch64-fbsd.c`, adapted from the x86_64 one
+      (syscall number in `x8`, `__syscall` shifts by one, errors in
+      `PSR_C`).
+    - ktrdump builds an aarch64 `va_list` from the logged argument blob
+      (every argument in an 8-byte stack slot).
+    - newfs_msdos: floppy ioctls are x86-only.
+    - grep's gnulib `__attribute_noreturn__` is emptied for clang.
+    - getconf, top and xz get small `__aarch64__` cases.
+  - Host tools (`bin/arm-hosttools`, all from the fork): byacc as `yacc`,
+    because bison places prologues differently; `rpcgen`, whose output
+    differs from glibc's in names; `unifdef`, needed for `bsdxml.h`; and
+    `gencat`. A generated `hostcompat.h` supplies `__dead2`,
+    `getprogname` and friends to glibc.
+  - `arm-world` shims: `find -s` (sorted), `gcc` → the target `cc`
+    (kdump's mkioctls), and `install -B/-f` accepted. The mtree pass
+    also creates `/var`.
+  - Order matters: run the `includes` stage before `dfregress`,
+    `gnu/lib` (luks.h), `gnu/sbin` and `tzsetup`.
+- **Bugs found by running the world (2026-10-03):**
+  - **rtld put libc's TLS on top of the TCB** (fork `f16e16bbe2`). A
+    main program without PT_TLS leaves module index 1 unused, so the
+    first block went through `calculate_tls_offset(0, 0, …)`. That is
+    offset 0 on variant I. `errno` and `_ThreadRuneLocale` then shared
+    the TCB's words, `isdigit()` read a garbage rune table, and
+    `tail -n 2` and `head -30` failed. The first placement now keys on
+    `tls_last_offset == 0`, which is identical on x86_64.
+  - **No `hw.machine`** (fork `91f2c9cb09`): `uname(3)` failed, so make
+    did too. arm64 now has `hw.machine`, `hw.model` (from MIDR_EL1, also
+    printed at boot), `hw.physmem`, `hw.usermem` and `hw.availpages`
+    (`sysconf(_SC_PHYS_PAGES)`).
+- **Phase 3 exit test under load: passed 2026-10-03.**
+  - `tools/arm-smoke/run-load.sh WORK 150 1500`: `mkworldroot.sh` puts
+    the installed world (`bin`, `sbin`, `lib`, `libexec`, `usr/*`, the
+    shared libraries, dltest) into an md root. QEMU runs `-smp 4 -m 2G`,
+    pinned with `taskset` to two host cpus, so the vcpus get preempted.
+  - In single-user mode on tmpfs: 150 rounds of `make -r -j8` over
+    `load.mk`. Each round is 16 jobs of awk, sort, gzip/gunzip, cmp,
+    uniq and wc over 20000 lines, each result checked. Alongside them,
+    two loops of 1500 dynamic dltest runs, each with a 30 s hang
+    watchdog.
+  - Result: `make-fail=0 hung-a=0 hung-b=0`. It ran 1 h 27 min under
+    TCG, about 35 s per round.
 - **Still open for 4b:**
-  - The rest of world (`bin`, `sbin`, `usr.*`), then the Phase 3 exit test
-    under load.
+  - `sbin/devd` (C++).
   - x86 check, done 2026-10-03 at fork `1496798ba5`:
     - `bin/arm-x86build build` + `boottest`: the x86_64 kernel builds
       and boots.
@@ -1522,9 +1580,9 @@ DragonFly hardware.
    Phase 2 hazards are done, and the MI changes build and boot on x86_64.
    The PL011 tty and Phase 4a (static `init` + interactive `sh`) are done
    (see Phase 4, Progress). Next:
-   - Phase 4b: libm, rtld and shared libc/libm are done (see Progress 4b).
-     Next: buildworld hookup, unwinder, NLS, Clang patch, the rest of
-     world; then the Phase 3 exit test under real load.
+   - Phase 4b is done, and so is the Phase 3 exit test under load (see
+     Progress 4b). Next: a multi-user boot (`/etc`, `pwd_mkdb`, rc,
+     sshd) to finish Phase 4; libc++ for `devd`; then Phase 5.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable

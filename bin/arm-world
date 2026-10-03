@@ -32,10 +32,11 @@ mtree_dirs() {
         $1 == ".." { n--; next }
         { d[++n] = $1; p = top; for (i = 1; i <= n; i++) p = p "/" d[i]; print p }' "$1"
 }
-[ -d "$SYSROOT/usr/lib/priv" ] || {
+[ -d "$SYSROOT/var/yp" ] || {
     mtree_dirs "$SRC/etc/mtree/BSD.root.dist" ""
     mtree_dirs "$SRC/etc/mtree/BSD.usr.dist" /usr
     mtree_dirs "$SRC/etc/mtree/BSD.include.dist" /usr/include
+    mtree_dirs "$SRC/etc/mtree/BSD.var.dist" /var
 } | sed "s|^|$SYSROOT|" | xargs mkdir -p
 # The clang driver links -lgcc_eh: an empty one until lib/libgcc_eh is built.
 [ -f "$SYSROOT/usr/lib/libgcc_eh.a" ] || llvm-ar-18 rc "$SYSROOT/usr/lib/libgcc_eh.a"
@@ -76,7 +77,7 @@ args= lnk=
 while [ $# -gt 0 ]; do
     case "$1" in
     -o|-g|-f|-B) shift ;;
-    -f?*) ;;
+    -f?*|-B?*|-o?*|-g?*) ;;
     -C|-S|-p|-c|-U|-v|-b) ;;
     -s) args="$args -s --strip-program=llvm-strip-18" ;;
     -l) lnk="$2"; shift ;;
@@ -103,22 +104,20 @@ case "$1" in -*h*) f=$(echo "$1" | tr h n); shift; set -- "$f" "$@" ;; esac
 exec /usr/bin/ln "$@"
 EOI
 chmod +x "$UB/ln"
-# rpcgen: the host's (glibc) one names the input's full path in the
-# generated #include "x.h"; BSD's uses the basename.  Run it on a link.
-cat > "$UB/rpcgen" <<'EOI'
+rm -f "$UB/rpcgen"	# bin/arm-hosttools builds the fork's rpcgen
+# find -s (BSD: visit each directory's entries sorted): GNU find has no -s,
+# so sort the output.  Paths sort slightly differently ("a/b" vs "a-b"),
+# which the users of -s (generated #include lists) do not care about.
+cat > "$UB/find" <<'EOI'
 #!/bin/sh
-n=$#; i=0
-for a; do
-    i=$((i + 1))
-    if [ $i -eq $n ] && [ "${a%.x}" != "$a" ] && [ "${a#*/}" != "$a" ]; then
-        ln -sfn "$a" "${a##*/}"; a="${a##*/}"
-    fi
-    set -- "$@" "$a"
-done
-shift $n
-exec /usr/bin/rpcgen "$@"
+[ "$1" = -s ] || exec /usr/bin/find "$@"
+shift
+/usr/bin/find "$@" | LC_ALL=C sort
 EOI
-chmod +x "$UB/rpcgen"
+chmod +x "$UB/find"
+# Scripts run "gcc" as DragonFly's system compiler (kdump's mkioctls
+# runs gcc -E over the target headers): that is the target cc here.
+ln -sf cc "$UB/gcc"
 # lorder | tsort orders archive members for one-pass linkers; ld.lld does not
 # care, so keep the given order.  tsort prints each node once, and libc's
 # list names the syscall stubs twice: drop repeats.
