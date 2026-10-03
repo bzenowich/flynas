@@ -1,9 +1,10 @@
 # DragonFly BSD on arm64 — FlyNAS on Raspberry Pi 4 Model B
 
-Status: **Phase 2 exit test passed** (2026-10-02). On QEMU `virt` a single
-CPU mounts an md root and runs a static aarch64 `/sbin/init` that writes to
-`/dev/console` and exits. Signals and the remaining Phase 2 hazards are
-still open (see Phase 2). Phase 3 (SMP) and Phase 4 (userland) are next.
+Status: **Phase 3 (SMP) is working** (2026-10-02). On QEMU `virt`, `-smp 1`,
+`2` and `4` boot to a static aarch64 `/sbin/init` from an md root, and a
+boot-time SMP stress test passes on 4 CPUs. The literal Phase 3 exit test
+(hours of `make -j8`) waits for userland. Signals and the remaining Phase 2
+hazards are still open (see Phase 2). Phase 4 (userland) is next.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -615,12 +616,10 @@ static ELF that does a `write` syscall and `exit`.
     `inittodr` reads the PL031 when the DTB has one.
 - **Open hazards / not done:**
   - `sendsig`/`sigreturn`/sigcode (`sigcode` is a 4-byte placeholder), ptrace and procfs registers.
-  - ASID rollover is not SMP-safe.
   - The DMAP attribute is not changed by `page_set_memattr`.
   - The kernel image is mapped RWX.
   - `pmap_object_init_pt` is a no-op.
   - The free pages at the 2MB tail of the kernel image are also reachable through KERNBASE.
-  - The AP path of `cpu_idle_restore`.
   - Kernel module relocation (`elf_reloc`) is still a stub.
   - The x86_64 rebuild in h2dev for the MI header changes has not been run.
 - **Debugging aids:**
@@ -650,6 +649,82 @@ static ELF that does a `write` syscall and `exit`.
 
 **Exit:** `-smp 4` boots on QEMU and survives a few hours of parallel
 `make -j8` plus `stress`-like workloads with `INVARIANTS`.
+
+#### Progress (2026-10-02)
+
+- **Commit:** fork `a021b024bb` "arm64: SMP: PSCI, AP start-up, GIC SGI
+  IPIs, SMP-safe ASIDs".
+- **What runs:** `bin/arm-vm -s 4 -r root.iso -a "vfs.root.mountfrom=cd9660:md0 debug.smp_stress=20"`
+  prints `SMP: 4 cpus started` and the topology (4 cores, 1 chip). It then
+  runs 20 s of `smp_stress` (454k iterations, 0 errors) and the static
+  init. The resulting panic stops the other CPUs and resets through PSCI.
+  `-smp 1` and `-smp 2` pass too. `INVARIANTS` is on.
+- **Design as built:**
+  - **PSCI** (`psci.c`): the conduit comes from `/psci` `method`. It is HVC on
+    QEMU without EL2, and SMC under TF-A or QEMU `virtualization=on`; the
+    kernel's own hyp stub never sees PSCI calls. PSCI 0.1 takes its function
+    ids from the DT. `cpu_reset` → SYSTEM_RESET; `RB_POWEROFF` → SYSTEM_OFF
+    via a `shutdown_final` handler.
+  - **CPU enumeration:** `mp_probe()` runs from `initarm`, because
+    `subr_cpu_topology.c` needs `naps` before the APs start. It reads the
+    `/cpus/cpu@*` `reg` (MPIDR), `status` and `enable-method`. For psci it
+    uses the PSCI firmware; for spin-table it uses that CPU's own
+    `cpu-release-addr`.
+  - **Topology:** `get_cpuid_from_apicid` scans `naps + 1` entries, not
+    `ncpus`, for the same reason. The packed hwid is Aff2:Aff1:Aff0: chip =
+    hwid >> 8 (cluster), core = Aff0.
+  - **AP start** (`start_all_aps`, at `SI_BOOT2_START_APS`) mirrors x86:
+    - Each AP gets a `kmem_alloc3` privatespace, `mi_gdinit`/`cpu_gdinit`,
+      an ipiq array and arc4.
+    - The APs start one at a time. `bootAP`/`ap_boot_sp` are globals, so no
+      register context is needed (spin tables pass none). The BSP waits up
+      to 5 s for the AP's bit in `smp_startup_mask` and panics otherwise.
+    - `locore.s` `mpentry` runs `enter_kernel_el` and turns the MMU on with
+      the boot tables. `boot_l0_id` still identity-maps the kernel GB, and
+      `boot_l0_k` is the kernel pmap's L0. TCR/MAIR come from the BSP via
+      `ap_boot_tcr`/`ap_boot_mair`, cleaned to PoC because the AP reads them
+      with the MMU off. It then jumps to KVA, sets `vbar_el1` and calls
+      `init_secondary()` (TPIDR_EL1, CPACR, empty TTBR0). Finally it
+      "switches" into the idle thread's `cpu_idle_restore` slot, which calls
+      `ap_init()` on an AP.
+    - `ap_init`/`ap_finish` are the x86 interlocks, with `gic_init_cpu()` in
+      place of the LAPIC and `smp_gic_mask` in place of `smp_lapic_mask`.
+  - **IPIs** are GIC SGIs: 0 IPIQ, 1 CPUSTOP, 2 SNIFF. `gic_ipi()` does a
+    `dsb ishst` before the GICD_SGIR write.
+    - `do_irq` → `sgi_intr()`. IPIQ follows x86 Xipiq: `gd_npoll` is swapped
+      to 0 before processing, or RQF_IPIQ is set in a critical section;
+      `doreti`/`splz` now swap `gd_npoll` too.
+    - CPUSTOP follows Xcpustop (`cpustop_handler()` in `mp_machdep.c`).
+      Stopped CPUs wait in WFE (`cpu_smp_stopped`), and `restart_cpus`
+      sends SEV.
+    - GICv2 addresses at most 8 CPUs.
+  - **ASIDs** follow FreeBSD's scheme:
+    - A per-generation bitmap. A rollover carries over the ASIDs of the
+      previous generation that some CPU's `gd_curpmap` holds, and flushes
+      (`tlbi vmalle1is`) only after that scan, under `asid_spin`.
+    - `pmap_activate_td` sets `gd_curpmap` before loading a pmap. Before a
+      different one, it first loads the empty table and only then clears
+      `gd_curpmap`, so that a rollover never reuses an ASID a CPU may still
+      walk with.
+    - `pmap_tlb_live()` does `dsb ish` before the generation check (pairs
+      with the allocator's store and TTBR0 load).
+    - `pmap_release` frees the ASID.
+    - Loader tunable `vm.pmap.asid_max=N` shrinks the ASID space to force
+      rollovers. It is untested until there is more than one user process.
+  - **`smp_stress.c`**: loader tunable `debug.smp_stress=SECONDS` runs one
+    thread per CPU before root mount. Each thread exercises atomics, a
+    spinlock and a token around plain counters, `lwkt_send_ipiq` to the next
+    CPU, `lwkt_cpusync_simple` to all, and cross-CPU kmalloc/kfree of
+    pattern-filled blocks. It also runs a kernel TLB shootdown check: cpu 0
+    `pmap_kenter`s one VA over 4 pages under an exclusive spinlock, and the
+    others read it under a shared one. All counts are checked at the end.
+- **Still open:**
+  - The literal exit test (hours of `make -j8`) needs Phase 4 userland.
+  - The ASID rollover path is not exercised yet (one user process).
+  - The spin-table path is untested until the Pi.
+  - All SPIs still go to cpu 0.
+  - No `cpu_send_ipiq_passive`.
+  - `detect_cpu_topology` is empty: the hwid functions do the work.
 
 ### Phase 4 — Userland (≈6–10 wk, can overlap Phases 2–3)
 
@@ -1084,11 +1159,13 @@ DragonFly hardware.
    wrapper.
 4. ~~Do Phase 1: headers, `locore.S`, PL011 early console, banner on QEMU.~~
    Done 2026-10-02 (see Phase 1).
-   Phase 2's exit test passed on 2026-10-02 (see Phase 2). Next:
+   Phase 2's exit test passed on 2026-10-02 (see Phase 2), and Phase 3
+   (SMP) works on QEMU with up to 4 CPUs (see Phase 3). Next:
    - signals (`sendsig`, `sigreturn`, sigcode);
    - the Phase 2 hazards;
-   - Phase 3 (SMP: PSCI CPU_ON, IPIs, ASIDs);
-   - Phase 4a (cross-built static `init` + `sh`), which needs a PL011 tty driver for an interactive shell.
+   - Phase 4a (cross-built static `init` + `sh`), which needs a PL011 tty
+     driver for an interactive shell; then the Phase 3 exit test under
+     real load.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
