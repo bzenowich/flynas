@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Pack a directory tree into a plain ISO 9660 image (no Rock Ridge, no
+Joliet) for the arm64 port's md root: bin/arm-vm -r IMAGE, booted with
+-a vfs.root.mountfrom=cd9660:md0.
+
+    bin/arm-mkiso OUT.iso DIR
+
+There are no image tools on the Linux host (no makefs/newfs/mkisofs), and
+DragonFly's cd9660 needs nothing beyond the base standard: names are
+upper-cased into "NAME.EXT;1" form and read back lower-cased with the
+version stripped, and every file is r-x for everyone.  So keep names
+short, lower-case and free of characters other than [a-z0-9_.].
+"""
+import os
+import struct
+import sys
+import time
+
+SECTOR = 2048
+
+
+def both16(v):
+    return struct.pack('<H', v) + struct.pack('>H', v)
+
+
+def both32(v):
+    return struct.pack('<I', v) + struct.pack('>I', v)
+
+
+def dirdate():
+    t = time.gmtime()
+    return bytes([t.tm_year - 1900, t.tm_mon, t.tm_mday,
+                  t.tm_hour, t.tm_min, t.tm_sec, 0])
+
+
+def isoname(name, isdir):
+    n = name.upper()
+    if isdir:
+        return n.encode()
+    if '.' not in n:
+        n += '.'
+    return (n + ';1').encode()
+
+
+def record(ident, extent, size, isdir):
+    rec = struct.pack('<BB', 0, 0) + both32(extent) + both32(size) + \
+        dirdate() + bytes([2 if isdir else 0, 0, 0]) + both16(1) + \
+        bytes([len(ident)]) + ident
+    if len(rec) % 2:
+        rec += b'\0'
+    return bytes([len(rec)]) + rec[1:]
+
+
+class Node:
+    def __init__(self, path, name, isdir, parent):
+        self.path, self.name, self.isdir, self.parent = path, name, isdir, parent
+        self.children = []
+        self.extent = 0
+        self.size = 0 if isdir else os.path.getsize(path)
+
+
+def scan(path, name, parent):
+    node = Node(path, name, True, parent)
+    for ent in sorted(os.listdir(path)):
+        p = os.path.join(path, ent)
+        if os.path.isdir(p):
+            node.children.append(scan(p, ent, node))
+        elif os.path.isfile(p):
+            node.children.append(Node(p, ent, False, node))
+    node.children.sort(key=lambda c: isoname(c.name, c.isdir))
+    return node
+
+
+def walk(node):
+    yield node
+    for c in node.children:
+        if c.isdir:
+            yield from walk(c)
+
+
+def dir_records(d):
+    """Records of directory d, laid out so none crosses a sector."""
+    recs = [record(b'\0', d.extent, d.size, True),
+            record(b'\1', (d.parent or d).extent, (d.parent or d).size, True)]
+    for c in d.children:
+        recs.append(record(isoname(c.name, c.isdir), c.extent, c.size,
+                           c.isdir))
+    out = b''
+    for r in recs:
+        if len(out) % SECTOR + len(r) > SECTOR:
+            out += b'\0' * (SECTOR - len(out) % SECTOR)
+        out += r
+    return out
+
+
+def main():
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    out, top = sys.argv[1], sys.argv[2]
+    root = scan(top, '', None)
+    dirs = list(walk(root))
+
+    # Sizes depend only on the record lengths, not on the extents.
+    for d in dirs:
+        d.size = -(-len(dir_records(d)) // SECTOR) * SECTOR
+    # 0-15 system area, 16 PVD, 17 terminator, 18/19 path tables (L/M).
+    sec = 20
+    for d in dirs:
+        d.extent = sec
+        sec += d.size // SECTOR
+    files = [c for d in dirs for c in d.children if not c.isdir]
+    for f in files:
+        f.extent = sec
+        sec += max(1, -(-f.size // SECTOR))
+    total = sec
+
+    # Path tables: directories in breadth-first order, parents numbered.
+    bfs, q = [], [root]
+    while q:
+        d = q.pop(0)
+        bfs.append(d)
+        q.extend(c for c in d.children if c.isdir)
+    num = {id(d): i + 1 for i, d in enumerate(bfs)}
+    lpt, mpt = b'', b''
+    for d in bfs:
+        ident = b'\0' if d is root else isoname(d.name, True)
+        par = num[id(d.parent or d)]
+        pad = b'\0' if len(ident) % 2 else b''
+        lpt += bytes([len(ident), 0]) + struct.pack('<IH', d.extent, par) + \
+            ident + pad
+        mpt += bytes([len(ident), 0]) + struct.pack('>IH', d.extent, par) + \
+            ident + pad
+    assert len(lpt) <= SECTOR
+
+    blank = b' '
+    pvd = bytes([1]) + b'CD001' + bytes([1, 0]) + \
+        b'DRAGONFLY'.ljust(32, blank) + b'ARM64_ROOT'.ljust(32, blank) + \
+        b'\0' * 8 + both32(total) + b'\0' * 32 + both16(1) + both16(1) + \
+        both16(SECTOR) + both32(len(lpt)) + struct.pack('<II', 18, 0) + \
+        struct.pack('>II', 19, 0) + record(b'\0', root.extent, root.size,
+                                           True) + \
+        blank * 128 * 4 + blank * 37 * 3 + \
+        (b'0' * 16 + b'\0') * 4 + bytes([1, 0])
+    term = bytes([255]) + b'CD001' + bytes([1])
+
+    img = bytearray(total * SECTOR)
+
+    def put(s, data):
+        img[s * SECTOR:s * SECTOR + len(data)] = data
+
+    put(16, pvd)
+    put(17, term)
+    put(18, lpt)
+    put(19, mpt)
+    for d in dirs:
+        put(d.extent, dir_records(d))
+    for f in files:
+        with open(f.path, 'rb') as fp:
+            put(f.extent, fp.read())
+    with open(out, 'wb') as fp:
+        fp.write(img)
+    print('arm-mkiso: %s, %d sectors, %d dirs, %d files'
+          % (out, total, len(dirs), len(files)))
+
+
+if __name__ == '__main__':
+    main()

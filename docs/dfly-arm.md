@@ -1,7 +1,9 @@
 # DragonFly BSD on arm64 — FlyNAS on Raspberry Pi 4 Model B
 
-Status: **Phase 1 done** (2026-10-02). The kernel boots on QEMU `virt` to
-the copyright banner and panics in the first VM sysinit. Phase 2 is next.
+Status: **Phase 2 exit test passed** (2026-10-02). On QEMU `virt` a single
+CPU mounts an md root and runs a static aarch64 `/sbin/init` that writes to
+`/dev/console` and exits. Signals and the remaining Phase 2 hazards are
+still open (see Phase 2). Phase 3 (SMP) and Phase 4 (userland) are next.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -559,6 +561,76 @@ This is the heart of the port.
 aarch64 `init` and `sh` (built in Phase 4a), or at least executes a hand-made
 static ELF that does a `write` syscall and `exit`.
 
+**Progress (2026-10-02): exit test passed.**
+
+- **Commits** on `arm64`:
+
+  | Commit | What |
+  |---|---|
+  | `06cb419c85` | pmap v1: DMAP of all RAM, kernel page tables grown on demand, user pmaps in TTBR0 with ASIDs, per-page PV lists, software A/D emulation via `pmap_fault()`, broadcast TLBI; `phys_avail[]` from `/memory`, `/memreserve/`, `/reserved-memory` |
+  | `77adc5f880` | GICv2 (`MachIntrABI`), generic timer (cputimer, cpucounter, cputimer_intr on PPI 27), IRQ dispatch with x86-style pending/`doreti`/`splz`, trivial topology |
+  | `35a000a2a3` | gtimer fix: `gtimer_intr_enable()` disarmed a timer that `gd_timer_running` still claimed was armed, so no tick ever fired |
+  | `3bb59b6fa2` | Context switch, `vm_machdep.c`, `trap.c`, `copyio.S`, `cpu_startup`, `cpu_idle`, `exec_setregs`, TLS, ELF brand, PL031 `inittodr`, initrd as md root, minimal `/dev/console` |
+
+- **What runs:**
+
+  ```
+  $ clang-18 --target=aarch64-unknown-dragonfly -c tools/arm-smoke/uinit.S -o uinit.o
+  $ mkdir -p root/sbin root/dev
+  $ tools/lld/usr/bin/ld.lld-18 -static -e _start uinit.o -o root/sbin/init
+  $ bin/arm-mkiso root.iso root
+  $ bin/arm-vm -r root.iso -a vfs.root.mountfrom=cd9660:md0
+  ...
+  Mounting root from cd9660:md0
+  Mounting devfs
+  uinit: hello from aarch64 userland
+  init died (signal 0, exit 0)
+  panic: Going nowhere without my init!
+  ```
+
+- **Design as built:**
+  - **Switch protocol.** `td_sp` points at a 16-byte slot `{restore
+    function, DAIF}`. The switch stores the old sp in `td_sp`, sets
+    `gd_curthread`, loads the new `td_sp` and branches to the slot's
+    function with x0 = new and x1 = old. Every restore calls
+    `pmap_activate_td`. Heavy switches save x19–x30/sp in the pcb, and
+    eagerly save q0–q31/FPSR/FPCR and `tpidr_el0`. Kernel threads start in
+    `cpu_kthread_restore` (function, argument and return address in
+    `pcb_x[0..2]`), forked user threads in `fork_trampoline`.
+  - **Syscall ABI** (FreeBSD-like, provisional until libc): `svc #0`, number
+    in x8, arguments x0–x7 then the user stack, results in x0/x1, errors as
+    errno in x0 with PSTATE.C set, ERESTART backs `elr` up by 4.
+    `exec_setregs` passes x0 = the stack (argc), x1 = `ps_strings`.
+  - **User access.** `copyio.S` uses LDTR/STTR after a range check against
+    `VM_MAX_USER_ADDRESS`. `pcb_onfault` recovery happens in `trap_pfault`.
+    The user atomics (`casu*`, `swapu*`, `fuwordadd*`) use LDAXR/STLXR and
+    rely on PAN being off.
+  - **Root.** QEMU `-initrd` lands in `/chosen linux,initrd-*`. `fdt_early`
+    reserves it, and `initarm` publishes it as an `md_image` preload record,
+    the record `md(4)` already looks for. There are no image tools on the Linux host, so
+    `bin/arm-mkiso` writes a plain ISO 9660 (`options CD9660`) from a
+    directory.
+  - **Console.** `/dev/console` forwards to `ttyu0`, a write-only polled
+    device in `early_uart.c`, until the PL011 gets a tty driver (Phase 5).
+    `inittodr` reads the PL031 when the DTB has one.
+- **Open hazards / not done:**
+  - `sendsig`/`sigreturn`/sigcode (`sigcode` is a 4-byte placeholder), ptrace and procfs registers.
+  - ASID rollover is not SMP-safe.
+  - The DMAP attribute is not changed by `page_set_memattr`.
+  - The kernel image is mapped RWX.
+  - `pmap_object_init_pt` is a no-op.
+  - The free pages at the 2MB tail of the kernel image are also reachable through KERNBASE.
+  - The AP path of `cpu_idle_restore`.
+  - Kernel module relocation (`elf_reloc`) is still a stub.
+  - The x86_64 rebuild in h2dev for the MI header changes has not been run.
+- **Debugging aids:**
+  - `bin/arm-vm -a "-v ..."` boots verbose.
+  - With no gdb on the host, start QEMU with `-monitor unix:...` and poll
+    `info registers` for PC/X30. Resolve with
+    `llvm-addr2line-18 -fi -e tools/kobj/ARM64_VIRT/kernel.debug`.
+  - A CPU sitting in `cpu_idle`'s WFI means every thread is blocked. Dump
+    `gd_tdallq` (`td_comm`, `td_wmesg`) from the idle loop to see why.
+
 ### Phase 3 — SMP (≈3–4 wk)
 
 - Bring up APs in `mp_machdep.c`:
@@ -1011,7 +1083,12 @@ DragonFly hardware.
 3. Write `bin/arm-vm` (QEMU `virt` + gdb) and the clang/lld kernel build
    wrapper.
 4. ~~Do Phase 1: headers, `locore.S`, PL011 early console, banner on QEMU.~~
-   Done 2026-10-02 (see Phase 1). Next is Phase 2, starting with `pmap_bootstrap`.
+   Done 2026-10-02 (see Phase 1).
+   Phase 2's exit test passed on 2026-10-02 (see Phase 2). Next:
+   - signals (`sendsig`, `sigreturn`, sigcode);
+   - the Phase 2 hazards;
+   - Phase 3 (SMP: PSCI CPU_ON, IPIs, ASIDs);
+   - Phase 4a (cross-built static `init` + `sh`), which needs a PL011 tty driver for an interactive shell.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable

@@ -8,6 +8,8 @@
 #     -s N       CPUs (default 1; -s 4 once SMP works)
 #     -m SIZE    RAM (default 1G)
 #     -a ARGS    kernel command line (/chosen/bootargs)
+#     -r IMAGE   root file system image, loaded as the initrd; the kernel
+#                makes it md0 (e.g. -a vfs.root.mountfrom=cd9660:md0)
 #     -t SECS    kill QEMU after SECS (default 120; 0 = no limit)
 #     -d FLAGS   QEMU -d tracing (e.g. int,guest_errors), to logs/arm-vm-qemu.log
 #
@@ -24,13 +26,14 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 QEMU="${ARM_VM_QEMU:-qemu-system-aarch64}"
 MACHINE="${ARM_VM_MACHINE:-virt,gic-version=2}"
 
-gdb=0; smp=1; mem=1G; append=""; timeout=120; dflags=""
-while getopts "gs:m:a:t:d:" o; do
+gdb=0; smp=1; mem=1G; append=""; timeout=120; dflags=""; initrd=""
+while getopts "gs:m:a:r:t:d:" o; do
     case "$o" in
         g) gdb=1 ;;
         s) smp="$OPTARG" ;;
         m) mem="$OPTARG" ;;
         a) append="$OPTARG" ;;
+        r) initrd="$OPTARG" ;;
         t) timeout="$OPTARG" ;;
         d) dflags="$OPTARG" ;;
         *) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2 ;;
@@ -44,6 +47,7 @@ mkdir -p "$REPO/logs"
 set -- -M "$MACHINE" -cpu cortex-a72 -smp "$smp" -m "$mem" \
     -nographic -no-reboot -kernel "$kernel"
 [ -n "$append" ] && set -- "$@" -append "$append"
+[ -n "$initrd" ] && set -- "$@" -initrd "$initrd"
 [ $gdb -eq 1 ] && set -- "$@" -S -gdb tcp:127.0.0.1:1234
 [ -n "$dflags" ] && set -- "$@" -d "$dflags" -D "$REPO/logs/arm-vm-qemu.log"
 [ $gdb -eq 1 ] && echo "arm-vm: waiting for gdb on 127.0.0.1:1234 (gdb-multiarch: target remote :1234)" >&2
