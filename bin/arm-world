@@ -1,0 +1,101 @@
+#!/bin/sh
+# Cross-build part of the aarch64 DragonFly userland on the Linux host.
+#
+#   bin/arm-world DIR [make targets...]    default targets: "obj all install"
+#   bin/arm-world lib/libc
+#   bin/arm-world bin/sh all
+#
+# DIR is relative to the fork.  Objects land in tools/uobj/<fork path>, and
+# "install" goes into the sysroot (tools/sysroot, see bin/arm-sysroot), which
+# is also what the compiler links against.  Toolchain: tools/host/ubin/cc
+# (clang-18, aarch64-unknown-dragonfly driver) and tools/lld ld.lld-18.
+# Options (-jN, VAR=value) may be mixed in with the targets; keep -j2 here.
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
+HOSTBIN="$REPO/tools/host/bin"
+UB="$REPO/tools/host/ubin"
+SYSROOT="${SYSROOT:-$REPO/tools/sysroot}"
+LLD="$REPO/tools/lld/usr/bin/ld.lld-18"
+
+[ $# -ge 1 ] || { sed -n '2,12p' "$0" >&2; exit 2; }
+dir="$1"; shift
+targets="${*:-obj all install}"
+[ -x "$HOSTBIN/bmake" ] || "$REPO/bin/arm-hosttools"
+[ -d "$SYSROOT/usr/include/sys" ] || "$REPO/bin/arm-sysroot" "$SYSROOT"
+mkdir -p "$SYSROOT/usr/lib" "$SYSROOT/usr/bin" "$SYSROOT/bin" "$SYSROOT/sbin" \
+    "$SYSROOT/usr/sbin" "$SYSROOT/usr/libexec" "$SYSROOT/usr/share/man"
+# The clang driver links -lgcc_eh; there is no unwinder yet, so an empty one.
+[ -f "$SYSROOT/usr/lib/libgcc_eh.a" ] || llvm-ar-18 rc "$SYSROOT/usr/lib/libgcc_eh.a"
+
+# Binutils names map to LLVM.  Static only for now (NOPIC, NOSHARED), and no
+# NLS catalogs (they need BSD gencat).  install(1) is BSD-flavoured in the makefiles
+# (-o/-g owner, -C, -S safe copy, -s strip): drop what GNU install lacks.
+mkdir -p "$UB"
+# The compiler: clang-18 has no aarch64 DragonFly target info, so the OS
+# predefines are supplied here; the driver's dragonfly toolchain still picks
+# crt*.o, -lc and -lgcc from the sysroot.
+cat > "$UB/cc" <<EOI
+#!/bin/sh
+case " \$* " in *" -c "*|*" -E "*|*" -S "*|*" -M "*) LD= ;; *) LD=-fuse-ld=$LLD ;; esac
+exec clang-18 --target=aarch64-unknown-dragonfly --sysroot=\${SYSROOT:-$SYSROOT} \\
+    \$LD \\
+    -D__DragonFly__=1 -D__DragonFly_cc_version=100001 -D__unix__=1 -D__unix=1 \\
+    -D__KPRINTF_ATTRIBUTE__=1 "\$@"
+EOI
+chmod +x "$UB/cc"
+ln -sf "$LLD" "$UB/ld"
+for t in nm objcopy objdump size readelf ar ranlib strip strings; do
+    ln -sf "$(command -v llvm-$t-18)" "$UB/$t"
+done
+cat > "$UB/install" <<'EOI'
+#!/bin/sh
+# BSD install(1) shim: owner/group/flags are ignored (unprivileged sysroot),
+# -s strips with llvm-strip, -l (link) is done with ln.
+args= lnk=
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -o|-g|-f|-B) shift ;;
+    -C|-S|-p|-c|-U|-v) ;;
+    -s) args="$args -s --strip-program=llvm-strip-18" ;;
+    -l) lnk="$2"; shift ;;
+    -m) args="$args -m $2"; shift ;;
+    -d) args="$args -d" ;;
+    -*) echo "install shim: unknown flag $1" >&2; exit 1 ;;
+    *) break ;;
+    esac
+    shift
+done
+if [ -n "$lnk" ]; then
+    case "$lnk" in *s*) exec ln -sfn "$@" ;; *) exec ln -fn "$@" ;; esac
+fi
+exec /usr/bin/install $args "$@"
+EOI
+chmod +x "$UB/install"
+# lorder | tsort orders archive members for one-pass linkers; ld.lld does not
+# care, so keep the given order.
+printf '#!/bin/sh\nfor f; do echo "$f"; done\n' > "$UB/lorder"
+printf '#!/bin/sh\nexec cat\n' > "$UB/tsort"
+chmod +x "$UB/lorder" "$UB/tsort"
+
+export PATH="$UB:$HOSTBIN:$PATH"
+export MAKEOBJDIRPREFIX="$REPO/tools/uobj"
+export SYSROOT
+mkdir -p "$MAKEOBJDIRPREFIX"
+cd "$SRC/$dir"
+# Each target is its own bmake run: "clean all install" in one -j run races.
+flags= tgts=
+for t in $targets; do case "$t" in -*|*=*) flags="$flags $t" ;; *) tgts="$tgts $t" ;; esac; done
+# Always "obj" first: a build run in the same bmake as the objdir's creation
+# writes into the source tree.
+case " $tgts " in *" obj "*) ;; *) tgts="obj $tgts" ;; esac
+for t in $tgts; do
+bmake -m "$SRC/share/mk" \
+    MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
+    CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
+    CC=cc CPP="cc -E" CXX=false LD=ld AR=ar RANLIB=ranlib NM=nm \
+    OBJCOPY=objcopy OBJDUMP=objdump SIZE=size STRIP=-s INSTALL=install \
+    DESTDIR="$SYSROOT" NOMAN=yes NOPROFILE=yes NOSHARED=yes NOPIC=yes NO_WERROR=yes NO_NLS=yes \
+    BINOWN=$(id -un) BINGRP=$(id -gn) \
+    $flags $t
+done

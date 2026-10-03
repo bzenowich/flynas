@@ -5,7 +5,10 @@ Status: **Phase 3 (SMP) is working** (2026-10-02). On QEMU `virt`, `-smp 1`,
 boot-time SMP stress test passes on 4 CPUs. The literal Phase 3 exit test
 (hours of `make -j8`) waits for userland. Signals, a W^X kernel image, DMAP
 memory attributes and kernel module loading are done too (see Phase 2).
-Phase 4 (userland) is next.
+The console is a real PL011 tty, and **Phase 4a works**: a cross-built
+static `init` drops to single-user and runs a static `/bin/sh`
+interactively (see Phase 4, Progress). Next is 4b (rtld, shared libs,
+libm, the rest of world).
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -612,8 +615,9 @@ static ELF that does a `write` syscall and `exit`.
     the record `md(4)` already looks for. There are no image tools on the Linux host, so
     `bin/arm-mkiso` writes a plain ISO 9660 (`options CD9660`) from a
     directory.
-  - **Console.** `/dev/console` forwards to `ttyu0`, a write-only polled
-    device in `early_uart.c`, until the PL011 gets a tty driver (Phase 5).
+  - **Console.** `/dev/console` forwards to `ttyu0`, the PL011 in
+    `early_uart.c`. It started as a write-only polled device; since fork
+    `395fd3eff2` it is an interrupt-driven tty (see Phase 4, Progress).
     `inittodr` reads the PL031 when the DTB has one.
 - **Hazards closed after the exit test (2026-10-02):**
   - **Signals** (fork `f3e8ad4ef0`).
@@ -807,6 +811,99 @@ static ELF that does a `write` syscall and `exit`.
 **Exit:** `make buildworld TARGET_ARCH=aarch64` on the Linux host produces
 a world. `installworld` to a disk image, boot it on QEMU `virt` to multi-user
 with `sshd`.
+
+#### Progress (2026-10-02)
+
+- **PL011 tty** (fork `395fd3eff2`, tests dfly `3bcf12f`).
+  - `ttyu0` in `early_uart.c` is now a real tty. The RX FIFO drains into
+    the line discipline from the UART interrupt (RX level, RX timeout,
+    error bits → `TTY_FE/PE/OE/BI`). TX refills from the TX interrupt.
+    Without a usable interrupt it falls back to a per-tick callout. The
+    firmware's baud rate is kept.
+  - `gic_fdt_irq()` turns a node's three-cell GIC `interrupts` entry into
+    an MI irq and sets its trigger mode. `fdt_early` records the
+    stdout-path node for it.
+  - This is enough for an interactive console. The proper `dev/serial`
+    driver stays in Phase 5.
+- **4a done: static userland** (fork `0089c146ed`).
+  - **Toolchain.** Stock host clang-18 + `tools/lld`, no clang patch yet.
+    `tools/host/ubin/cc` (written by `bin/arm-world`) runs
+    `clang --target=aarch64-unknown-dragonfly --sysroot=tools/sysroot` and
+    supplies the OS predefines itself, since clang-18 has no aarch64
+    DragonFly target info. The driver's DragonFly toolchain still picks
+    `crt*.o`, `-lc` and `-lgcc` from the sysroot. The Clang patch above is
+    still needed for a native compiler and for shared linking.
+  - **Runtime.** `contrib/compiler-rt` (FreeBSD's `lib/builtins`,
+    unmodified) built by `lib/libcompiler_rt` as `libgcc.a`;
+    `lib/csu/aarch64` (crt1 adapted from x86_64, crti/crtn from FreeBSD,
+    crtbegin/crtend). Neither is hooked into buildworld yet. The clang
+    driver also links `-lgcc_eh`; there is no unwinder, so `arm-world`
+    creates an empty `libgcc_eh.a`.
+  - **libc MD** (`lib/libc/aarch64`): `SYS.h` + stubs (`svc #0`, carry =
+    error), `cerror` with errno in static TLS, getcontext/makecontext,
+    `rfork_thread`, setjmp family (FreeBSD), FP mode helpers, IEEE-quad
+    long double classifiers, gdtoa glue (`strtorQ`, `machdep_ldisQ.c`),
+    `static_tls.h`, `Symbol.map`. `lib/libc/thread/aarch64`: `pthread_md.h`
+    and the `_umtx_*_err` stubs.
+  - **MI touches**, both checked byte-identical on x86_64:
+    `gen/tls.c` gets the TLS variant I layout (`[tcb][pad][TLS]`,
+    `tpidr_el0` → tcb); `thread/thr_umtx.h` `cpu_pause()` is `yield` on
+    aarch64.
+  - **Headers.** OpenBSD's arm64 `ieee.h`/`fenv.h` in
+    `contrib/openbsd_libm` (libc needs `machine/ieee.h`), `ieeefp.h`,
+    `setjmp.h` with an `__ASSEMBLER__` guard, 16-byte aligned
+    `mc_fpregs`.
+  - **Kernel.** `exec_setregs` sets `MDP_EXECED`, and the syscall return
+    path then leaves x0/x1 alone. Before, a successful `execve()` wrote 0
+    over the new image's x0 (the stack pointer for `_start`), so every
+    exec'd program crashed in `_start`. pid 1 is exec'd outside a syscall
+    and never saw it. `ARM64_VIRT` gains `_KPOSIX_PRIORITY_SCHEDULING`
+    (`sched_yield`).
+  - **Built so far:** libc, libutil, libcrypt, csu, libgcc; `/bin/sh`
+    (`BOOTSTRAPPING=1`: `-DNO_HISTORY`, pregenerated sources) and
+    `/sbin/init`, all static.
+  - **Tests** (dfly `tools/arm-smoke`):
+    - `libctest.c`: ctors, stdio + quad long double, TLS errno, malloc,
+      setjmp/signals, ucontext, fork/pipe/wait, pthreads + `__thread`.
+      Passes as init and under sh.
+    - `sh.exp`: init → single-user → sh, 21 expect steps (arithmetic,
+      parameter expansion, loops, pipes, functions, `cd`/`pwd`, running
+      libctest, ^C out of a busy loop). Passes.
+    - sigtest and ttytest still pass.
+- **Host tooling** (dfly):
+  - `bin/arm-sysroot [DIR]` stages `/usr/include` into `tools/sysroot`,
+    taking the file lists from the makefiles (`bmake -V`). `rpc/` and
+    `rpcsvc/` headers come from the host's `rpcgen`.
+  - `bin/arm-world DIR [targets] [-j2] [VAR=val]` runs the fork's
+    makefiles with bmake for aarch64. Objects go to
+    `tools/uobj/<fork path>`, and `install` goes into the sysroot. It is
+    static only (`NOSHARED`, `NOPIC`) with `NO_NLS` (no BSD gencat).
+    GNU install's missing flags are filtered out.
+  - Recipe for an interactive root:
+    ```sh
+    bin/arm-world lib/csu/aarch64; bin/arm-world lib/libcompiler_rt
+    bin/arm-world lib/libc -j2; bin/arm-world lib/libutil; bin/arm-world lib/libcrypt
+    bin/arm-world bin/sh obj all BOOTSTRAPPING=1; bin/arm-world sbin/init obj all
+    # root dir with sbin/init, bin/sh, dev/, etc/, tmp/ (stripped), then:
+    bin/arm-mkiso sh.iso ROOT
+    tools/arm-smoke/vmexpect.py -w 90 tools/arm-smoke/sh.exp -- \
+        -s 2 -r sh.iso -a "vfs.root.mountfrom=cd9660:md0"
+    ```
+- **Gotchas:**
+  - When libc runs as pid 1 its thread init does `setsid`,
+    `revoke("/dev/console")` and `TIOCSCTTY` (`thr_init.c`). That revokes
+    descriptors init opened earlier. libctest forks a child for the
+    tests when it is pid 1.
+  - DragonFly's `getcontext()` clears `uc_link`.
+  - `nan()` is in libm, which isn't built yet.
+- **Still open for 4b:**
+  - rtld, `NOSHARED` off, PIC libs.
+  - libm: needs OpenBSD's ld128 sources and `arch/aarch64/fenv.c`.
+  - Hook csu and libcompiler_rt into buildworld. A real unwinder for
+    `libgcc_eh`.
+  - NLS.
+  - The Clang target patch.
+  - The rest of world, then the Phase 3 exit test under load.
 
 ### Phase 5 — FDT, newbus and generic devices (≈3–5 wk)
 
@@ -1202,10 +1299,10 @@ DragonFly hardware.
    Phase 2's exit test passed on 2026-10-02 (see Phase 2), and Phase 3
    (SMP) works on QEMU with up to 4 CPUs (see Phase 3). Signals and the
    Phase 2 hazards are done, and the MI changes build and boot on x86_64.
-   Next:
-   - Phase 4a (cross-built static `init` + `sh`), which needs a PL011 tty
-     driver for an interactive shell; then the Phase 3 exit test under
-     real load.
+   The PL011 tty and Phase 4a (static `init` + interactive `sh`) are done
+   (see Phase 4, Progress). Next:
+   - Phase 4b: rtld and shared libraries, libm, the rest of world; then
+     the Phase 3 exit test under real load.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable

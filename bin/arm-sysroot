@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Stage the aarch64 DragonFly headers into a cross sysroot on the Linux host.
+
+    bin/arm-sysroot [SYSROOT]        default: tools/sysroot
+
+The fork's include/Makefile installs /usr/include with mtree, BSD install and
+cpdup, none of which exist here.  This does the same layout by hand, taking the
+file lists from the makefiles themselves (bmake -V) so they cannot drift:
+
+  include/ INCS (+ generated osreldate.h), arpa protocols rpc xlocale
+  LHDRS and the other INCSLINKS as symlinks
+  sys/{LDIRS,LSUBDIRS}/*.h, acpiio.h, the evdev headers
+  cpu/     = sys/cpu/aarch64/include
+  machine/ = cpu/ overlaid with sys/platform/arm64/include
+  every lib/*/Makefile that sets INCS (all INCSGROUPS)
+
+rpc/ and rpcsvc/ HDRS are rpcgen output; the host's rpcgen generates them.
+Files are only rewritten when their contents change, so incremental userland
+builds are not invalidated by a re-stage.
+"""
+import filecmp
+import os
+import shutil
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.abspath(os.environ.get("DFLY_SRC", os.path.join(REPO, "..", "dragonfly")))
+HOSTBIN = os.path.join(REPO, "tools", "host", "bin")
+ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, "tools", "sysroot"))
+INC = os.path.join(ROOT, "usr", "include")
+
+MAKEVARS = ["MACHINE=arm64", "MACHINE_ARCH=aarch64", "MACHINE_PLATFORM=arm64",
+            "CCVER=llvm18", "HOST_CCVER=llvm18", "HOST_BINUTILSVER=none"]
+copied = 0
+
+
+def bmake_vars(d, names):
+    """Expand make variables in directory d; returns {name: value}."""
+    args = [os.path.join(HOSTBIN, "bmake"), "-m", os.path.join(SRC, "share", "mk")] + MAKEVARS
+    for n in names:
+        args += ["-V", n]
+    out = subprocess.run(args, cwd=d, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError("%s: bmake -V failed:\n%s" % (d, out.stderr))
+    lines = out.stdout.split("\n")
+    return {n: lines[i].strip() for i, n in enumerate(names)}
+
+
+def put(src, dst):
+    """Copy src to dst unless dst already has the same contents."""
+    global copied
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.islink(dst):
+        os.unlink(dst)
+    if os.path.exists(dst) and filecmp.cmp(src, dst, shallow=False):
+        return
+    shutil.copyfile(src, dst)
+    os.chmod(dst, 0o644)
+    copied += 1
+
+
+def put_text(text, dst):
+    global copied
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.exists(dst) and open(dst).read() == text:
+        return
+    with open(dst, "w") as f:
+        f.write(text)
+    copied += 1
+
+
+def link(target, name):
+    os.makedirs(os.path.dirname(name), exist_ok=True)
+    if os.path.islink(name) and os.readlink(name) == target:
+        return
+    if os.path.lexists(name):
+        if os.path.isdir(name) and not os.path.islink(name):
+            shutil.rmtree(name)
+        else:
+            os.unlink(name)
+    os.symlink(target, name)
+
+
+def dest(dir_):
+    """Map an install dir (/usr/include/...) into the sysroot."""
+    return os.path.join(ROOT, dir_.lstrip("/"))
+
+
+def find(name, curdir, path):
+    for d in [curdir] + path:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def install_incs(d, skip=()):
+    """Install every INCSGROUPS group of the makefile in d, plus INCSLINKS."""
+    v = bmake_vars(d, ["INCSGROUPS", ".PATH", "INCSLINKS"])
+    groups = v["INCSGROUPS"].split() or ["INCS"]
+    path = [p if os.path.isabs(p) else os.path.join(d, p) for p in v[".PATH"].split()]
+    gv = bmake_vars(d, groups + [g + "DIR" for g in groups])
+    n = 0
+    for g in groups:
+        gdir = gv[g + "DIR"] or "/usr/include"
+        for f in gv[g].split():
+            if f in skip:
+                continue
+            src = find(f, d, path)
+            if src is None:
+                print("  %s: %s not found, skipped" % (os.path.relpath(d, SRC), f))
+                continue
+            put(src, os.path.join(dest(gdir), os.path.basename(f)))
+            n += 1
+    links = v["INCSLINKS"].split()
+    for t, l in zip(links[0::2], links[1::2]):
+        link(t, dest(l))
+    return n
+
+
+def rpc_incs(sd, d):
+    """HFILES and XFILES are plain files; HDRS are generated from XFILES."""
+    hv = bmake_vars(sd, ["HFILES", "XFILES", "HDRS", "RPCHDRS"])
+    for f in hv["HFILES"].split() + hv["XFILES"].split():
+        put(os.path.join(sd, f), os.path.join(INC, d, f))
+    for h in hv["HDRS"].split():
+        x = h[:-2] + ".x"
+        if h == "nis.h":
+            x = "nis.x"
+        out = subprocess.run(["rpcgen", "-C", "-h", "-DWANT_NFS3", x],
+                             cwd=sd, capture_output=True, text=True)
+        if out.returncode != 0:
+            print("  include/%s: rpcgen %s failed, skipped:\n%s" % (d, x, out.stderr))
+            continue
+        put_text(out.stdout, os.path.join(INC, d, h))
+        if h in hv["RPCHDRS"].split():
+            put_text(out.stdout, os.path.join(INC, "rpc", h))
+
+
+def main():
+    sysdir = os.path.join(SRC, "sys")
+    incdir = os.path.join(SRC, "include")
+    print("==> headers from %s -> %s" % (SRC, INC))
+
+    # include/: generated osreldate.h first, then INCS.
+    v = bmake_vars(incdir, ["RELDATE", "LHDRS", "LDIRS", "LSUBDIRS", "SHDRS", "SUBDIR"])
+    copyright = subprocess.run(["sh", os.path.join(SRC, "tools", "gencopyright.sh"), SRC],
+                               capture_output=True, text=True, check=True).stdout
+    put_text(copyright + "#ifdef _KERNEL\n"
+             '#error "osreldate.h must not be used in the kernel, use sys/param.h"\n'
+             "#else\n#undef __DragonFly_version\n#define __DragonFly_version %s\n#endif\n"
+             % v["RELDATE"], os.path.join(INC, "osreldate.h"))
+    install_incs(incdir, skip=("osreldate.h",))
+    for h in v["LHDRS"].split():
+        link("sys/" + h, os.path.join(INC, h))
+
+    for d in v["SUBDIR"].split():
+        sd = os.path.join(incdir, d)
+        if d in ("rpc", "rpcsvc"):
+            rpc_incs(sd, d)
+            continue
+        install_incs(sd)
+
+    # sys/ directories.
+    for d in v["LDIRS"].split() + v["LSUBDIRS"].split():
+        src = os.path.join(sysdir, d)
+        for f in sorted(os.listdir(src)):
+            if f.endswith(".h"):
+                put(os.path.join(src, f), os.path.join(INC, d, f))
+    put(os.path.join(sysdir, "dev/acpica/acpiio.h"), os.path.join(INC, "dev/acpica/acpiio.h"))
+    for f in ("input.h", "input-event-codes.h"):
+        put(os.path.join(sysdir, "dev/misc/evdev", f), os.path.join(INC, "dev/misc/evdev", f))
+        put(os.path.join(sysdir, "dev/misc/evdev", f), os.path.join(INC, "compat/linux", f))
+    drm = os.path.join(sysdir, "dev/drm/include")
+    for s, t in (("linux/compiler.h", "compat/linux"), ("linux/posix_types.h", "compat/linux"),
+                 ("linux/types.h", "compat/linux"),
+                 ("uapi/asm-generic/int-ll64.h", "compat/uapi/asm-generic"),
+                 ("uapi/linux/types.h", "compat/uapi/linux"),
+                 ("asm/bitsperlong.h", "compat/asm"), ("asm/int-ll64.h", "compat/asm"),
+                 ("asm/ioctl.h", "compat/asm")):
+        put(os.path.join(drm, s), os.path.join(INC, t, os.path.basename(s)))
+
+    # cpu/ and machine/: machine is cpu overlaid by the platform headers.
+    cpu = os.path.join(sysdir, "cpu", "aarch64", "include")
+    plat = os.path.join(sysdir, "platform", "arm64", "include")
+    for f in sorted(os.listdir(cpu)):
+        if f.endswith(".h"):
+            put(os.path.join(cpu, f), os.path.join(INC, "cpu", f))
+            if not os.path.exists(os.path.join(plat, f)):
+                put(os.path.join(cpu, f), os.path.join(INC, "machine", f))
+    for f in sorted(os.listdir(plat)):
+        if f.endswith(".h"):
+            put(os.path.join(plat, f), os.path.join(INC, "machine", f))
+    for h in v["SHDRS"].split():
+        link("../sys/" + h, os.path.join(INC, "machine", h))
+
+    # Library headers.
+    libdir = os.path.join(SRC, "lib")
+    for l in sorted(os.listdir(libdir)):
+        mk = os.path.join(libdir, l, "Makefile")
+        if not os.path.isfile(mk):
+            continue
+        with open(mk, errors="replace") as f:
+            if not any(line.startswith(("INCS", "INCSGROUPS")) for line in f):
+                continue
+        try:
+            install_incs(os.path.join(libdir, l))
+        except RuntimeError as e:
+            print("  lib/%s: skipped (%s)" % (l, str(e).splitlines()[-1]))
+
+    print("==> %d file(s) updated" % copied)
+
+
+if __name__ == "__main__":
+    main()

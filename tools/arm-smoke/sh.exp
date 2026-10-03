@@ -1,0 +1,25 @@
+# vmexpect.py script for a root with the cross-built /sbin/init, /bin/sh and
+# /bin/libctest (see dfly-arm.md Phase 4a).  There is no /etc/rc, so init
+# drops to single-user and asks for a shell.  The terminal echoes each
+# command, so no expect string appears literally in the line sent.
+expect Enter full pathname of shell or RETURN for /bin/sh:
+send \r
+expect #
+send echo "sum=$((6 * 7))" ; x=abc; echo ${#x}${x%c}\r
+expect sum=42
+expect 3ab
+send for i in 1 2 3; do printf '<%s>' $i; done; echo\r
+expect <1><2><3>
+send echo piped | (read v; echo "got $v") ; echo "status $?"\r
+expect got piped
+expect status 0
+send f() { return $(($1 + 1)); }; f 4; echo "f=$?"; cd /bin && echo "dir=$(pwd)"\r
+expect f=5
+expect dir=/bin
+send /bin/libctest; echo "libctest rc=$?"\r
+expect libctest: PASS
+expect libctest rc=0
+send while :; do :; done\r
+send \x03
+send echo "after $((1 + 1)) intr"\r
+expect after 2 intr
