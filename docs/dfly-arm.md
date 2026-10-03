@@ -7,8 +7,9 @@ boot-time SMP stress test passes on 4 CPUs. The literal Phase 3 exit test
 memory attributes and kernel module loading are done too (see Phase 2).
 The console is a real PL011 tty, and **Phase 4a works**: a cross-built
 static `init` drops to single-user and runs a static `/bin/sh`
-interactively (see Phase 4, Progress). Next is 4b (rtld, shared libs,
-libm, the rest of world).
+interactively (see Phase 4, Progress). In 4b, libm, rtld and shared
+libc/libm work (2026-10-03, dynamic programs with shared-library TLS and
+dlopen pass on QEMU). Next: the rest of world.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -896,14 +897,85 @@ with `sshd`.
     tests when it is pid 1.
   - DragonFly's `getcontext()` clears `uc_link`.
   - `nan()` is in libm, which isn't built yet.
+
+#### Progress 4b (2026-10-03)
+
+- **libm** (fork `80f16a01c5`, test dfly `45749b9`).
+  - IEEE quad long double comes from OpenBSD's `src/ld128` and
+    `arch/aarch64/fenv.c`, imported into `contrib/openbsd_libm`.
+  - Bugs fixed in the ld128 code:
+    - `LDBL_IMPLICIT_NBIT` / `LDBL_MANH_SIZE` were never defined, so
+      `truncl` and `remquol` were wrong.
+    - `remquol` lost the sign and the integer bit.
+    - `cbrtl` was scaled wrongly.
+  - New `ld128/e_sqrtl.c`: the generic version needs a quad division that
+    honours rounding modes, and compiler-rt's doesn't.
+  - `libmtest.c` checks all of it, static and shared.
+- **rtld and shared libraries** (fork `aef36a195a`).
+  - `libexec/rtld-elf/aarch64` (`reloc.c`, `rtld_machdep.h`,
+    `rtld_start.S`) is adapted from FreeBSD, with TLSDESC (static, dynamic,
+    undefined-weak), IRELATIVE and variant-PCS PLT slots.
+  - `RTLD_IS_DYNAMIC()` is the constant 1. Before self-relocation the GOT
+    slot for `_DYNAMIC` is still 0, and the MI test then skipped rtld's
+    own relocation.
+  - **TLS variant I in MI `rtld.c`:**
+    - `allocate_tls`/`free_tls` keep the TCB at the start of the static
+      block.
+    - Module offsets start at `roundup2(16, align)`, and
+      `tls_static_space` counts the TCB.
+    - The TCB alignment follows the largest static module.
+    - x86_64 code paths are unchanged, except that `reloc_plt()` takes
+      `flags` and `lockstate`.
+  - **libc_rtld:**
+    - C string fallbacks;
+    - aarch64 `setjmp` objects;
+    - `longjmperror`;
+    - `cerror.S` stores a plain global errno there.
+  - **libc.so** links `-lgcc_pic`, since compiler-rt's quad helpers are
+    hidden and each DSO gets its own copy. `libcompiler_rt` builds PIC and
+    hidden, and installs `libgcc_pic.a` as a link to `libgcc.a`.
+  - **Built shared:** `libc.so.8`, `libm.so.4`, `ld-elf.so.2`.
+- **Host tooling** (dfly):
+  - `ARM_SHARED=1 bin/arm-world …` drops `NOSHARED`/`NOPIC`.
+  - lld gets `--undefined-version`, because the symbol maps name symbols
+    some builds lack.
+  - Shims: `tsort` dedups, which matters because libc lists its syscall
+    objects twice. `install` ignores `-f`/`-b`; `chflags` is a no-op; `ln`
+    maps `-h` to `-n`.
+  - Absolute symlinks installed into the sysroot are rewritten as
+    relative ones. Otherwise lld silently fell back to `libc.a`.
+- **Tests** (dfly `tools/arm-smoke`):
+  - `dltest.c` + `dltestlib.c` (`build-dltest.sh`):
+    - TLS of a `DT_NEEDED` library and of a dlopen()ed one, across
+      threads, including a thread that started before the dlopen;
+    - dlclose and reopen;
+    - dlsym/dladdr;
+    - a lazy PLT bind with all argument registers live.
+  - `run-dyn.sh WORK` builds a root with static init and sh plus dynamic
+    dltest, libctest and libmtest, and runs `dyn.exp`, both lazy and with
+    `LD_BIND_NOW`. All 19 steps pass.
+  - `dlsym()` returns a function's definition, not the executable's
+    canonical PLT entry, as on FreeBSD. So `dlsym(RTLD_DEFAULT, "f") != f`
+    when the program takes `f`'s address.
+- **Recipe:**
+  ```sh
+  ARM_SHARED=1 bin/arm-world lib/libcompiler_rt clean all install
+  ARM_SHARED=1 bin/arm-world lib/libc clean all install -j2
+  ARM_SHARED=1 bin/arm-world lib/libm clean all install -j2
+  ARM_SHARED=1 bin/arm-world libexec/rtld-elf
+  tools/arm-smoke/run-dyn.sh WORK      # needs sh and init built (4a recipe)
+  ```
+- **Not yet x86-checked:** the MI rtld changes (`rtld.c` variant I under
+  `#ifdef`, the `reloc_plt` signature, the `rtld_lock.c` include) and
+  `rtld_libc.c`. Run `bin/arm-x86build` with the next batch of MI
+  changes.
 - **Still open for 4b:**
-  - rtld, `NOSHARED` off, PIC libs.
-  - libm: needs OpenBSD's ld128 sources and `arch/aarch64/fenv.c`.
-  - Hook csu and libcompiler_rt into buildworld. A real unwinder for
-    `libgcc_eh`.
+  - Hook csu and libcompiler_rt into buildworld.
+  - A real unwinder for `libgcc_eh`.
   - NLS.
   - The Clang target patch.
-  - The rest of world, then the Phase 3 exit test under load.
+  - The rest of world (more libraries shared, then `bin`, `sbin`, `usr.*`),
+    then the Phase 3 exit test under load.
 
 ### Phase 5 — FDT, newbus and generic devices (≈3–5 wk)
 
@@ -1301,8 +1373,9 @@ DragonFly hardware.
    Phase 2 hazards are done, and the MI changes build and boot on x86_64.
    The PL011 tty and Phase 4a (static `init` + interactive `sh`) are done
    (see Phase 4, Progress). Next:
-   - Phase 4b: rtld and shared libraries, libm, the rest of world; then
-     the Phase 3 exit test under real load.
+   - Phase 4b: libm, rtld and shared libc/libm are done (see Progress 4b).
+     Next: buildworld hookup, unwinder, NLS, Clang patch, the rest of
+     world; then the Phase 3 exit test under real load.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable

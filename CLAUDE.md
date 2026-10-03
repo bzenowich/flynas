@@ -47,7 +47,7 @@ Use these instead of ad-hoc ssh/scp:
 | `bin/arm-vm [-g] [-s N] [-t SECS] [KERNEL]` | arm64 port: boot an aarch64 kernel on QEMU `virt` (Cortex-A72, GICv2); always TCG, timeout on by default |
 | `bin/arm-mkiso OUT DIR` | arm64 port: write a plain ISO 9660 md root (lowercase names) for `bin/arm-vm -r` |
 | `bin/arm-sysroot [DIR]` | arm64 port: stage the fork's `/usr/include` into `tools/sysroot` |
-| `bin/arm-world DIR [targets] [-j2] [VAR=val]` | arm64 port: cross-build a userland dir (static) with bmake, install into the sysroot |
+| `bin/arm-world DIR [targets] [-j2] [VAR=val]` | arm64 port: cross-build a userland dir with bmake (static; `ARM_SHARED=1` for PIC/shared), install into the sysroot |
 | `bin/arm-x86build {sync\|build\|quick\|install\|boottest}` | arm64 port: build the fork as x86_64 in h2dev (`-j2`) and boot-test it once, to prove MI changes don't break x86 |
 
 `bin/deploy` defaults to `service flynas reload`. Use `--restart` when

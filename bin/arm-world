@@ -10,6 +10,8 @@
 # is also what the compiler links against.  Toolchain: tools/host/ubin/cc
 # (clang-18, aarch64-unknown-dragonfly driver) and tools/lld ld.lld-18.
 # Options (-jN, VAR=value) may be mixed in with the targets; keep -j2 here.
+# ARM_SHARED=1 in the environment builds PIC and shared objects too (rtld,
+# shared libs); the default is static only (NOPIC, NOSHARED).
 set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
@@ -24,20 +26,23 @@ targets="${*:-obj all install}"
 [ -x "$HOSTBIN/bmake" ] || "$REPO/bin/arm-hosttools"
 [ -d "$SYSROOT/usr/include/sys" ] || "$REPO/bin/arm-sysroot" "$SYSROOT"
 mkdir -p "$SYSROOT/usr/lib" "$SYSROOT/usr/bin" "$SYSROOT/bin" "$SYSROOT/sbin" \
-    "$SYSROOT/usr/sbin" "$SYSROOT/usr/libexec" "$SYSROOT/usr/share/man"
+    "$SYSROOT/usr/sbin" "$SYSROOT/usr/libexec" "$SYSROOT/usr/share/man" \
+    "$SYSROOT/lib" "$SYSROOT/libexec"
 # The clang driver links -lgcc_eh; there is no unwinder yet, so an empty one.
 [ -f "$SYSROOT/usr/lib/libgcc_eh.a" ] || llvm-ar-18 rc "$SYSROOT/usr/lib/libgcc_eh.a"
 
-# Binutils names map to LLVM.  Static only for now (NOPIC, NOSHARED), and no
+# Binutils names map to LLVM.  Static by default (NOPIC, NOSHARED), and no
 # NLS catalogs (they need BSD gencat).  install(1) is BSD-flavoured in the makefiles
 # (-o/-g owner, -C, -S safe copy, -s strip): drop what GNU install lacks.
 mkdir -p "$UB"
 # The compiler: clang-18 has no aarch64 DragonFly target info, so the OS
 # predefines are supplied here; the driver's dragonfly toolchain still picks
-# crt*.o, -lc and -lgcc from the sysroot.
+# crt*.o, -lc and -lgcc from the sysroot.  The symbol maps name symbols
+# some builds lack, which GNU ld accepts: --undefined-version does the same
+# for lld.
 cat > "$UB/cc" <<EOI
 #!/bin/sh
-case " \$* " in *" -c "*|*" -E "*|*" -S "*|*" -M "*) LD= ;; *) LD=-fuse-ld=$LLD ;; esac
+case " \$* " in *" -c "*|*" -E "*|*" -S "*|*" -M "*) LD= ;; *) LD="-fuse-ld=$LLD -Wl,--undefined-version" ;; esac
 exec clang-18 --target=aarch64-unknown-dragonfly --sysroot=\${SYSROOT:-$SYSROOT} \\
     \$LD \\
     -D__DragonFly__=1 -D__DragonFly_cc_version=100001 -D__unix__=1 -D__unix=1 \\
@@ -56,7 +61,8 @@ args= lnk=
 while [ $# -gt 0 ]; do
     case "$1" in
     -o|-g|-f|-B) shift ;;
-    -C|-S|-p|-c|-U|-v) ;;
+    -f?*) ;;
+    -C|-S|-p|-c|-U|-v|-b) ;;
     -s) args="$args -s --strip-program=llvm-strip-18" ;;
     -l) lnk="$2"; shift ;;
     -m) args="$args -m $2"; shift ;;
@@ -72,10 +78,21 @@ fi
 exec /usr/bin/install $args "$@"
 EOI
 chmod +x "$UB/install"
+# File flags (schg) don't exist in the sysroot.
+printf '#!/bin/sh\nexit 0\n' > "$UB/chflags"
+chmod +x "$UB/chflags"
+# BSD ln -h (don't follow a symlinked target dir) is GNU ln -n.
+cat > "$UB/ln" <<'EOI'
+#!/bin/sh
+case "$1" in -*h*) f=$(echo "$1" | tr h n); shift; set -- "$f" "$@" ;; esac
+exec /usr/bin/ln "$@"
+EOI
+chmod +x "$UB/ln"
 # lorder | tsort orders archive members for one-pass linkers; ld.lld does not
-# care, so keep the given order.
+# care, so keep the given order.  tsort prints each node once, and libc's
+# list names the syscall stubs twice: drop repeats.
 printf '#!/bin/sh\nfor f; do echo "$f"; done\n' > "$UB/lorder"
-printf '#!/bin/sh\nexec cat\n' > "$UB/tsort"
+printf '#!/bin/sh\nexec awk '"'"'!seen[$0]++'"'"'\n' > "$UB/tsort"
 chmod +x "$UB/lorder" "$UB/tsort"
 
 export PATH="$UB:$HOSTBIN:$PATH"
@@ -89,13 +106,21 @@ for t in $targets; do case "$t" in -*|*=*) flags="$flags $t" ;; *) tgts="$tgts $
 # Always "obj" first: a build run in the same bmake as the objdir's creation
 # writes into the source tree.
 case " $tgts " in *" obj "*) ;; *) tgts="obj $tgts" ;; esac
+static="NOSHARED=yes NOPIC=yes"
+[ "${ARM_SHARED:-0}" = 1 ] && static=
 for t in $tgts; do
 bmake -m "$SRC/share/mk" \
     MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
     CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
     CC=cc CPP="cc -E" CXX=false LD=ld AR=ar RANLIB=ranlib NM=nm \
     OBJCOPY=objcopy OBJDUMP=objdump SIZE=size STRIP=-s INSTALL=install \
-    DESTDIR="$SYSROOT" NOMAN=yes NOPROFILE=yes NOSHARED=yes NOPIC=yes NO_WERROR=yes NO_NLS=yes \
+    DESTDIR="$SYSROOT" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes NO_NLS=yes \
     BINOWN=$(id -un) BINGRP=$(id -gn) \
     $flags $t
+done
+# Installed symlinks are absolute (/lib/libc.so.8), which on the host points
+# outside the sysroot: make them relative to it.
+find "$SYSROOT" -type l -lname '/*' | while read -r l; do
+    t=$(readlink "$l")
+    ln -sfn "$(realpath -m --relative-to="$(dirname "$l")" "$SYSROOT$t")" "$l"
 done

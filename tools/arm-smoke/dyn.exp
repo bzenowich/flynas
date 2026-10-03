@@ -1,0 +1,21 @@
+# vmexpect.py script for run-dyn.sh: dynamic programs under rtld from a
+# root with the cross-built static /sbin/init and /bin/sh.
+expect Enter full pathname of shell or RETURN for /bin/sh:
+send \r
+expect #
+send /bin/dltest; echo "dltest rc=$?"\r
+expect dltest: PASS
+expect rc=0
+expect #
+send LD_BIND_NOW=1 /bin/dltest; echo "dltest now rc=$?"\r
+expect dltest: PASS
+expect rc=0
+expect #
+send /bin/libctest; echo "libctest rc=$?"\r
+expect libctest: PASS
+expect rc=0
+expect #
+send LD_BIND_NOW=1 /bin/libmtest; echo "libmtest rc=$?"\r
+expect libmtest: PASS
+expect rc=0
+expect # 
