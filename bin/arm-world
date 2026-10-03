@@ -66,8 +66,11 @@ exec clang-18 --target=aarch64-unknown-dragonfly --sysroot=\${SYSROOT:-$SYSROOT}
     -D__KPRINTF_ATTRIBUTE__=1 "\$@"
 EOI
 chmod +x "$UB/cc"
-# C++ (the unwinder's sources): no C++ library yet, so -nostdinc++.
-sed -e 's/exec clang-18 /exec clang++-18 -nostdinc++ /' "$UB/cc" > "$UB/c++"
+# C++: libc++ from the sysroot (lib/libc++), as the patched driver does on
+# aarch64.  -stdlib++-isystem stands in for its /usr/include/c++/v1 and
+# yields to -nostdinc++ (libc++'s own build, the unwinder).
+sed -e 's|exec clang-18 |exec clang++-18 -stdlib++-isystem \${SYSROOT:-'"$SYSROOT"'}/usr/include/c++/v1 |' \
+    -e 's|LD="-fuse-ld=|LD="-stdlib=libc++ -fuse-ld=|' "$UB/cc" > "$UB/c++"
 chmod +x "$UB/c++"
 ln -sf "$LLD" "$UB/ld"
 for t in nm objcopy objdump size readelf ar ranlib strip strings; do

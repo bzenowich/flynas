@@ -5,7 +5,8 @@
 # getty, the databases and an ssh login over loopback (no NIC until Phase 5).
 #   run-multiuser.sh [-n] WORK [-- arm-vm args...]
 #   -n  reuse WORK/root from an earlier run (only redo the image)
-# The image gets an fstab, an rc.conf with sshd and an ssh key for root.
+# The image gets an fstab, an rc.conf with sshd, an ssh key for root, and
+# cxxtest.cc built dynamic and static in /root.
 # WAIT= sets the expect timeout per step (default 900 s).
 D=$(cd "$(dirname "$0")/../.." && pwd)
 T="$D/tools/arm-smoke"
@@ -34,6 +35,10 @@ cp "$R/root/.ssh/id_ed25519.pub" "$R/root/.ssh/authorized_keys"
     echo "$R/root/.ssh/id_ed25519 root wheel 600"
     echo "$R/root/.ssh/authorized_keys root wheel 600"
 } >> "$R.metalog"
+for l in dyn static; do
+    f=; [ $l = static ] && f=-static
+    "$D/tools/host/ubin/c++" -O2 -std=c++20 -pthread $f "$T/cxxtest.cc" -o "$R/root/cxxtest-$l"
+done
 "$D/bin/arm-mkimg" -s 400m "$R" "$W/root.img"
 exec "$T/vmexpect.py" -w "${WAIT:-900}" "$T/multiuser.exp" -- \
     -m 2G -t 0 -r "$W/root.img" -a "vfs.root.mountfrom=ufs:md0" "$@"

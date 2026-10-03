@@ -48,8 +48,8 @@ for d in libexec include lib bin games gnu sbin share usr.bin usr.sbin etc; do
     echo "==> $d" >> "$LOG"
     j=-j2
     [ $d = etc ] && j=	# etc/sendmail's files are installed twice: they race
-    ARM_SHARED=1 ARM_DESTDIR="$ROOT" "$REPO/bin/arm-world" "$d" install $j ${ARM_IW_TMP_K:+-k} \
-        >> "$LOG" 2>&1 || [ -n "${ARM_IW_TMP_K:-}" ] || { echo "install failed in $d, see $LOG" >&2; exit 1; }
+    ARM_SHARED=1 ARM_DESTDIR="$ROOT" "$REPO/bin/arm-world" "$d" install $j \
+        >> "$LOG" 2>&1 || { echo "install failed in $d, see $LOG" >&2; exit 1; }
 done
 echo "==> etc distribution"
 echo "==> etc distribution" >> "$LOG"

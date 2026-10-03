@@ -1,8 +1,9 @@
 # vmexpect.py script for run-multiuser.sh: multi-user boot of the installed
 # world.  rc runs (fsck, mount -uw, sshd key generation and start), getty
 # offers a login on the console, root logs in (csh, no password), then sh
-# checks the databases and logs in again with ssh over lo0.  Markers are
-# split in the commands so the echoed command lines cannot match.
+# checks the databases, devd, the C++ runtime (cxxtest.cc), and logs in
+# again with ssh over lo0.  Markers are split in the commands so the
+# echoed command lines cannot match.
 expect login:
 send root\r
 expect #
@@ -16,6 +17,12 @@ send mount | grep -c 'md0 on / (ufs, local)' | sed 's/^/MO''UNT /'\r
 expect MOUNT 1
 send pgrep -x sshd > /dev/null && echo "SSH""D up"\r
 expect SSHD up
+send pgrep -x devd > /dev/null && echo "DEV""D up"\r
+expect DEVD up
+send /root/cxxtest-dyn | sed 's/^/D/'\r
+expect DCXX ok
+send /root/cxxtest-static | sed 's/^/S/'\r
+expect SCXX ok
 send ssh -o StrictHostKeyChecking=no -o BatchMode=yes root@localhost 'uname -sm; echo SSH""LOGIN ok'\r
 expect SSHLOGIN ok
 send echo "AL""L done"\r
