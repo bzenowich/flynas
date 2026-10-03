@@ -1,0 +1,58 @@
+#!/bin/sh
+# installworld + "etc distribution" for the cross-built aarch64 world, into a
+# root directory on the Linux host (the image for bin/arm-mkimg):
+#
+#   bin/arm-installworld ROOT
+#
+# Runs each world directory's install target (Makefile.inc1's SUBDIR order)
+# with ARM_DESTDIR=ROOT (see bin/arm-world), from the objects the world
+# build left in tools/uobj; then etc's distribution target lays down /etc,
+# /var and the password and login.conf databases (host pwd_mkdb, cap_mkdb).
+# Everything stays owned by the invoking user: owners, groups and modes the
+# makefiles asked for go to ROOT.metalog, which bin/arm-mkimg applies.
+# Logs: ROOT.log.  ROOT is removed first.
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
+[ $# -eq 1 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
+mkdir -p "$1"
+ROOT="$(cd "$1" && pwd)"
+LOG="$ROOT.log"
+[ -x "$REPO/tools/host/bin/pwd_mkdb" ] || "$REPO/bin/arm-hosttools"
+
+case "$ROOT" in /|"$HOME"|"$REPO"|"$SRC") echo "refusing ROOT=$ROOT" >&2; exit 1 ;; esac
+rm -rf "$ROOT" "$ROOT.metalog"
+mkdir -p "$ROOT"
+: > "$LOG"
+
+# distrib-dirs: the directory tree from etc/mtree (bin/arm-mkimg applies
+# the owners and modes those files give).
+mtree_dirs() {
+    awk -v top="$2" '/^#|^\/|^[ \t]*$/ { next }
+        $1 == "." { n = 0; next }
+        $1 == ".." { n--; next }
+        { d[++n] = $1; p = top; for (i = 1; i <= n; i++) p = p "/" d[i]; print p }' "$1"
+}
+{
+    mtree_dirs "$SRC/etc/mtree/BSD.root.dist" ""
+    mtree_dirs "$SRC/etc/mtree/BSD.var.dist" /var
+    mtree_dirs "$SRC/etc/mtree/BSD.usr.dist" /usr
+    mtree_dirs "$SRC/etc/mtree/BSD.include.dist" /usr/include
+} | sed "s|^|$ROOT|" | xargs mkdir -p
+ln -s usr/src/sys "$ROOT/sys"
+ln -s C "$ROOT/usr/share/nls/POSIX"
+ln -s C "$ROOT/usr/share/nls/en_US.US-ASCII"
+
+for d in libexec include lib bin games gnu sbin share usr.bin usr.sbin etc; do
+    echo "==> $d"
+    echo "==> $d" >> "$LOG"
+    j=-j2
+    [ $d = etc ] && j=	# etc/sendmail's files are installed twice: they race
+    ARM_SHARED=1 ARM_DESTDIR="$ROOT" "$REPO/bin/arm-world" "$d" install $j ${ARM_IW_TMP_K:+-k} \
+        >> "$LOG" 2>&1 || [ -n "${ARM_IW_TMP_K:-}" ] || { echo "install failed in $d, see $LOG" >&2; exit 1; }
+done
+echo "==> etc distribution"
+echo "==> etc distribution" >> "$LOG"
+ARM_SHARED=1 ARM_DESTDIR="$ROOT" "$REPO/bin/arm-world" etc distribution \
+    >> "$LOG" 2>&1 || { echo "etc distribution failed, see $LOG" >&2; exit 1; }
+echo "world in $ROOT: $(du -sh "$ROOT" | cut -f1), $(find "$ROOT" -type f | wc -l) files"

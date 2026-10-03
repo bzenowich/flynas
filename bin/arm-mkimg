@@ -1,0 +1,141 @@
+#!/bin/sh
+# Make a UFS (FFS1, little endian) image of a root tree on the Linux host:
+#
+#   bin/arm-mkimg [-s SIZE] ROOT IMAGE      SIZE as makefs takes it (300m)
+#
+# The tree is owned by the invoking user, so ownership comes from an mtree
+# spec handed to makefs -F: everything is root:wheel (0:0) with the modes on
+# disk less group/other write (umask 022), then the directories get what
+# etc/mtree/BSD.*.dist give, and files get what the makefiles asked for
+# (ROOT.metalog from bin/arm-installworld: "path owner group mode", later
+# lines win).  Names are resolved against ROOT/etc/master.passwd and
+# ROOT/etc/group.  The spec is left in IMAGE.spec.
+# Boot it as an md root: bin/arm-vm -r IMAGE -a vfs.root.mountfrom=ufs:md0
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
+size=
+while getopts s: opt; do
+    case $opt in s) size=$OPTARG ;; *) exit 2 ;; esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 2 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
+ROOT="$(cd "$1" && pwd)"
+IMAGE="$2"
+[ -x "$REPO/tools/host/bin/makefs" ] || "$REPO/bin/arm-hosttools"
+
+python3 - "$ROOT" "$SRC/etc/mtree" > "$IMAGE.spec" <<'EOF'
+import os, stat, sys
+
+root, mtree = sys.argv[1], sys.argv[2]
+
+def ids(path, idcol):
+    m = {}
+    try:
+        for line in open(path):
+            if line.startswith('#') or ':' not in line:
+                continue
+            f = line.split(':')
+            m[f[0]] = int(f[idcol])
+    except FileNotFoundError:
+        pass
+    return m
+
+users = ids(os.path.join(root, 'etc/master.passwd'), 2)
+groups = ids(os.path.join(root, 'etc/group'), 2)
+users.setdefault('root', 0)
+groups.setdefault('wheel', 0)
+
+def uid(n):
+    return int(n) if n.isdigit() else users[n]
+
+def gid(n):
+    return int(n) if n.isdigit() else groups[n]
+
+attrs = {}	# relative path -> {uid, gid, mode}
+
+def setattr_(rel, own, grp, mode):
+    a = attrs.setdefault(rel, {})
+    if own not in (None, '-'):
+        a['uid'] = uid(own)
+    if grp not in (None, '-'):
+        a['gid'] = gid(grp)
+    if mode not in (None, '-'):
+        a['mode'] = int(mode, 8) & 0o7777
+
+# etc/mtree/BSD.*.dist: directories.
+for dist, top in (('BSD.root.dist', ''), ('BSD.var.dist', 'var'),
+                  ('BSD.usr.dist', 'usr'), ('BSD.include.dist', 'usr/include')):
+    sets, stack = {}, []
+    for line in open(os.path.join(mtree, dist)):
+        w = line.split('#', 1)[0].split()
+        if not w:
+            continue
+        kw = dict(x.split('=', 1) for x in w[1:] if '=' in x)
+        if w[0] == '/set':
+            sets.update(kw)
+            continue
+        if w[0] == '/unset':
+            for x in w[1:]:
+                sets.pop(x, None)
+            continue
+        if w[0] == '..':
+            if stack:	# the last one climbs out of "."
+                stack.pop()
+            continue
+        if w[0] == '.':
+            stack = []
+            rel = top or '.'
+        else:
+            stack.append(w[0])
+            rel = '/'.join([top] + stack).lstrip('/')
+        k = dict(sets, **kw)
+        if os.path.isdir(os.path.join(root, rel)):
+            setattr_(rel, k.get('uname'), k.get('gname'), k.get('mode'))
+
+# The makefiles' install -o/-g/-m.
+pre = root.rstrip('/') + '/'
+try:
+    for line in open(root + '.metalog'):
+        w = line.split()
+        if len(w) != 4 or not w[0].startswith(pre):
+            continue
+        rel = os.path.normpath(w[0][len(pre):])
+        if os.path.lexists(os.path.join(root, rel)):
+            setattr_(rel, w[1], w[2], w[3])
+except FileNotFoundError:
+    pass
+
+SAFE = set(b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+           b'0123456789._-+,:@%=~^')
+
+def vis(name):	# what strunvis(3) reads back
+    return ''.join(chr(c) if c in SAFE else '\\%03o' % c
+                   for c in os.fsencode(name))
+
+def entry(rel, st):
+    m = st.st_mode
+    t = ('dir' if stat.S_ISDIR(m) else 'link' if stat.S_ISLNK(m) else
+         'file' if stat.S_ISREG(m) else None)
+    if t is None:
+        sys.exit('arm-mkimg: %s: not a file, directory or link' % rel)
+    a = attrs.get(rel, {})
+    mode = a.get('mode', stat.S_IMODE(m) & ~0o022)	# as with umask 022
+    if t == 'link':
+        mode = 0o755
+    name = '.' if rel == '.' else './' + '/'.join(vis(p) for p in rel.split('/'))
+    print('%s type=%s uid=%d gid=%d mode=%04o' %
+          (name, t, a.get('uid', 0), a.get('gid', 0), mode))
+
+print('#mtree')
+entry('.', os.lstat(root))
+for d, dirs, files in os.walk(root):
+    dirs.sort()
+    rd = os.path.relpath(d, root)
+    for n in sorted(dirs + files):
+        rel = n if rd == '.' else rd + '/' + n
+        entry(rel, os.lstat(os.path.join(d, n)))
+EOF
+rm -f "$IMAGE"
+"$REPO/tools/host/bin/makefs" -t ffs -B le -o version=1 ${size:+-s $size} \
+    -F "$IMAGE.spec" "$IMAGE" "$ROOT"

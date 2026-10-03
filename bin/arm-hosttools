@@ -11,6 +11,13 @@
 #   unifdef usr.bin/unifdef (libexpat's bsdxml.h)
 #   gencat  usr.bin/gencat (BSD catalog format, big endian; glibc's gencat
 #           writes its own incompatible format)
+#   makefs  usr.sbin/makefs, FFS only (the image for bin/arm-installworld)
+#   pwd_mkdb, cap_mkdb  with libc's db(3), which glibc lacks (etc
+#           distribution builds /etc/pwd.db and login.conf.db with them)
+#   zic     usr.sbin/zic (share/zoneinfo; Linux hosts may have none)
+#   localedef usr.bin/localedef (share/*def: the BSD locale format, which
+#           glibc's localedef doesn't write)
+#   mkcsmapper, mkesdb  usr.bin/mk* (share/i18n: citrus iconv tables)
 #
 #   bin/arm-hosttools          build (re-run after pulling upstream)
 #   bin/arm-hosttools --clean  remove tools/host
@@ -94,6 +101,298 @@ $HCC -I"$r" "$SRC"/usr.bin/rpcgen/*.c -o "$BIN/rpcgen"
 # --- unifdef ---------------------------------------------------------------
 echo "==> unifdef"
 $HCC -I"$SRC/usr.bin/unifdef" "$SRC/usr.bin/unifdef/unifdef.c" -o "$BIN/unifdef"
+
+# --- shared bits for the libc-heavy tools below ------------------------------
+# Built with implicit declarations as errors: a missing prototype on LP64
+# truncates returned pointers (dbopen(3) is behind __BSD_VISIBLE).
+l="$OUT/build/bsdlib"
+mkdir -p "$l/sys"
+: > "$l/namespace.h"; : > "$l/un-namespace.h"; : > "$l/libc_private.h"
+cat > "$l/sys/endian.h" <<'EOF2'
+#include <endian.h>
+#include <byteswap.h>
+#define	bswap16(x)	bswap_16(x)
+#define	bswap32(x)	bswap_32(x)
+#define	bswap64(x)	bswap_64(x)
+EOF2
+cat > "$l/bsdlib.h" <<'EOF2'
+/* libc and <sys/cdefs.h> pieces of DragonFly that glibc lacks. */
+#include <sys/types.h>
+#include <sys/param.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#define	__FBSDID(s)	struct __hack
+#define	__RCSID(s)	struct __hack
+#define	CTASSERT(x)	struct __hack
+#define	__packed	__attribute__((__packed__))
+#define	__aligned(x)	__attribute__((__aligned__(x)))
+#define	__predict_false(e) __builtin_expect((e), 0)
+#define	__predict_true(e) __builtin_expect((e), 1)
+#define	__offsetof(t, m)	offsetof(t, m)
+#define	__PAST_END(array, offset) (((__typeof__(*(array)) *)(array))[offset])
+#ifndef roundup2
+#define	roundup2(x, y)	(((x) + ((y) - 1)) & ~((y) - 1))
+#endif
+#ifndef rounddown2
+#define	rounddown2(x, y)	((x) & ~((y) - 1))
+#endif
+#define	UID_MAX		UINT32_MAX
+#define	GID_MAX		UINT32_MAX
+#define	_sigprocmask	sigprocmask
+char	*fgetln(FILE *, size_t *);
+void	 errc(int, int, const char *, ...);
+void	 setprogname(const char *);
+int	 issetugid(void);
+void	*reallocf(void *, size_t);
+int	 setpassent(int);
+int	 setgroupent(int);
+long long strtonum(const char *, long long, long long, const char **);
+mode_t	 getmode(const void *, mode_t);
+void	*setmode(const char *);
+#define	S_ISTXT		S_ISVTX
+#define	__pure		__attribute__((__pure__))
+#define	__pure2		__attribute__((__const__))
+#define	EFTYPE		EINVAL
+EOF2
+cat > "$l/hostlib.c" <<'EOF2'
+/* The libc functions the tools use that glibc lacks. */
+#include <err.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+char *
+fgetln(FILE *fp, size_t *lenp)
+{
+	static char *buf;
+	static size_t cap;
+	ssize_t n;
+
+	if ((n = getline(&buf, &cap, fp)) < 0)
+		return (NULL);
+	*lenp = n;
+	return (buf);
+}
+
+void
+errc(int eval, int code, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	errno = code;
+	verr(eval, fmt, ap);
+}
+
+void
+setprogname(const char *name)
+{
+	(void)name;
+}
+
+int
+issetugid(void)
+{
+	return (0);
+}
+
+void *
+reallocf(void *p, size_t n)
+{
+	void *q;
+
+	if ((q = realloc(p, n)) == NULL)
+		free(p);
+	return (q);
+}
+
+int
+setpassent(int stayopen)
+{
+	(void)stayopen;
+	return (1);
+}
+
+int
+setgroupent(int stayopen)
+{
+	(void)stayopen;
+	return (1);
+}
+EOF2
+LCC="$CC -O2 -w -Werror=implicit-function-declaration -Werror=int-conversion -Werror=incompatible-pointer-types -D_GNU_SOURCE -include $OUT/build/hostcompat.h -include $l/bsdlib.h -I$l"
+# hcomp DIR SRC...: compile into DIR with $LCC and the tool's own $XF.
+hcomp() {
+    od="$1"; shift; mkdir -p "$od"
+    for f; do $LCC $XF -c "$f" -o "$od/$(basename "$f" .c).o"; done
+}
+
+# --- makefs (FFS) ------------------------------------------------------------
+# The FFS writer plus mtree's spec reader (-F), and the libc/libutil/kernel
+# helpers it links; cd9660, msdos and hammer2 are left out of the table.
+m="$SRC/usr.sbin/makefs"
+o="$OUT/build/makefs"
+echo "==> makefs"
+rm -rf "$o"; mkdir -p "$o/sys"
+cat > "$o/libutil.h" <<'EOF2'
+#include <stdarg.h>
+void	(*esetfunc(void (*)(int, const char *, ...)))(int, const char *, ...);
+size_t	 estrlcpy(char *, const char *, size_t);
+size_t	 estrlcat(char *, const char *, size_t);
+char	*estrdup(const char *);
+char	*estrndup(const char *, size_t);
+void	*ecalloc(size_t, size_t);
+void	*emalloc(size_t);
+void	*erealloc(void *, size_t);
+int	 easprintf(char **, const char *, ...);
+int	 evasprintf(char **, const char *, va_list);
+FILE	*efopen(const char *, const char *);
+EOF2
+ln -s libutil.h "$o/util.h"
+sed 's|<machine/stdint.h>|<stdint.h>|' "$SRC/include/vis.h" > "$o/vis.h"
+sed 's|<machine/stdarg.h>|<stdarg.h>|' "$SRC/sys/sys/sbuf.h" > "$o/sys/sbuf.h"
+sed -n '/^enum vtype/,/;/p' "$SRC/sys/sys/vfscache.h" > "$o/sys/vfscache.h"
+ln -s "$SRC/sys/vfs" "$o/vfs"
+{ cat <<'EOF2'
+#include <endian.h>
+#include <sys/sysmacros.h>
+#include <sys/time.h>
+#include <signal.h>
+#include <assert.h>
+#define	__va_list	va_list
+#define	__va_start(ap, l)	va_start(ap, l)
+#define	__va_end(ap)	va_end(ap)
+#define	__printf0like(f, a)
+#define	_DIAGASSERT(e)	assert(e)
+#ifndef MAXFRAG
+#define	MAXFRAG		8
+#endif
+#define	MAXPHYS		(128 * 1024)
+#define	FPARSELN_UNESCESC	0x01
+#define	FPARSELN_UNESCCONT	0x02
+#define	FPARSELN_UNESCCOMM	0x04
+#define	FPARSELN_UNESCREST	0x08
+#define	FPARSELN_UNESCALL	0x0f
+char	*fparseln(FILE *, size_t *, size_t *, const char[3], int);
+long long strsuftoll(const char *, const char *, long long, long long);
+long long strsuftollx(const char *, const char *, long long, long long,
+	    char *, size_t);
+struct passwd;
+struct group;
+const char *user_from_uid(uid_t, int);
+int	 uid_from_user(const char *, uid_t *);
+int	 pwcache_userdb(int (*)(int), void (*)(void),
+	    struct passwd *(*)(const char *), struct passwd *(*)(uid_t));
+const char *group_from_gid(gid_t, int);
+int	 gid_from_group(const char *, gid_t *);
+int	 pwcache_groupdb(int (*)(int), void (*)(void),
+	    struct group *(*)(const char *), struct group *(*)(gid_t));
+EOF2
+  grep -E '^#define[[:space:]]+[US]F_[A-Z]+[[:space:]]' "$SRC/sys/sys/stat.h"
+} > "$o/makefs_host.h"
+sed -e '/ENTRY(cd9660)/d' -e '/ENTRY(msdos)/d' -e '/ENTRY(hammer2)/d' \
+    "$m/makefs.c" > "$o/makefs.c"
+XF="-include $o/makefs_host.h -I$o -I$l -I$m -I$m/../mtree -I$SRC/lib/libc/gen \
+    -D__DragonFly__ -DHAVE_NBTOOL_CONFIG_H=0 -DHAVE_STRUCT_STAT_ST_FLAGS=0 \
+    -DHAVE_STRUCT_STAT_BIRTHTIME=0 -DHAVE_STRUCT_STAT_ST_MTIMENSEC=0 \
+    -DHAVE_STRUCT_STATVFS_F_IOSIZE=0 -DHAVE_NETDB_H=1"
+hcomp "$o/obj" "$o/makefs.c" "$l/hostlib.c" "$m/ffs.c" "$m/walk.c" "$m/mtree.c" \
+    "$m"/ffs/ffs_alloc.c "$m"/ffs/ffs_balloc.c "$m"/ffs/ffs_bswap.c \
+    "$m"/ffs/ffs_subr.c "$m"/ffs/ufs_bmap.c "$m"/ffs/buf.c "$m"/ffs/mkfs.c \
+    "$SRC/sys/vfs/ufs/ffs_tables.c" "$SRC/sys/kern/subr_sbuf.c" \
+    "$m"/../mtree/getid.c "$m"/../mtree/misc.c "$m"/../mtree/pack_dev.c \
+    "$m"/../mtree/spec.c "$m"/../mtree/stat_flags.c "$SRC/lib/libutil/efun.c" \
+    "$SRC"/lib/libc/gen/vis.c "$SRC"/lib/libc/gen/unvis.c \
+    "$SRC"/lib/libc/gen/setmode.c "$SRC"/lib/libc/gen/pwcache.c \
+    "$SRC/lib/libc/stdlib/strsuftoll.c" "$SRC/lib/libc/stdio/fparseln.c"
+$CC -o "$BIN/makefs" "$o"/obj/*.o
+
+# --- pwd_mkdb, cap_mkdb ------------------------------------------------------
+# libc's db(3) (hash, btree, recno) and getcap(3): glibc has neither.
+d="$OUT/build/db"
+echo "==> pwd_mkdb, cap_mkdb"
+rm -rf "$d"; mkdir -p "$d"
+cp "$SRC/include/db.h" "$SRC/include/mpool.h" "$d/"
+sed 's|<machine/stdint.h>|<stdint.h>|' "$SRC/include/pwd.h" > "$d/pwd.h"
+cat > "$d/dbhost.h" <<'EOF2'
+#include <sys/file.h>
+#define	__BSD_VISIBLE	1
+#define	_open	open
+#define	_close	close
+#define	_read	read
+#define	_write	write
+#define	_fstat	fstat
+#define	_fsync	fsync
+#define	_fcntl	fcntl
+#define	_unlink	unlink
+#define	_writev	writev
+#define	O_EXLOCK	0	/* one writer: the build */
+#define	O_SHLOCK	0
+#ifndef MAXBSIZE
+#define	MAXBSIZE	65536
+#endif
+EOF2
+sed -n '/getcap(3) functions/,/^$/p' "$SRC/include/stdlib.h" >> "$d/dbhost.h"
+XF="-D__DBINTERFACE_PRIVATE -include $d/dbhost.h -I$d -I$l \
+    -I$SRC/lib/libc/include -I$SRC/lib/libc/gen -I$SRC/usr.sbin/pwd_mkdb"
+hcomp "$d/obj" "$SRC"/lib/libc/db/db/db.c "$SRC"/lib/libc/db/mpool/mpool.c \
+    "$SRC"/lib/libc/db/hash/hash*.c $(ls "$SRC"/lib/libc/db/btree/bt_*.c | grep -v bt_debug) \
+    "$SRC"/lib/libc/db/recno/rec_*.c "$SRC/lib/libc/gen/pw_scan.c" \
+    "$SRC/lib/libc/gen/getcap.c" "$SRC/lib/libc/stdlib/strtonum.c" "$l/hostlib.c"
+hcomp "$d/main" "$SRC/usr.sbin/pwd_mkdb/pwd_mkdb.c" "$SRC/usr.bin/cap_mkdb/cap_mkdb.c"
+$CC -o "$BIN/pwd_mkdb" "$d/main/pwd_mkdb.o" "$d"/obj/*.o
+$CC -o "$BIN/cap_mkdb" "$d/main/cap_mkdb.o" "$d"/obj/*.o
+
+# --- zic -----------------------------------------------------------------------
+z="$SRC/usr.sbin/zic"
+echo "==> zic"
+XF="-I$l -I$z -I$SRC/lib/libc/stdtime"
+hcomp "$OUT/build/zic" "$z/zic.c" "$z/ialloc.c" "$z/scheck.c" \
+    "$SRC/lib/libc/gen/setmode.c"
+$CC -o "$BIN/zic" "$OUT"/build/zic/*.o
+
+# --- localedef -------------------------------------------------------------
+# Its output is fixed-size little-endian records (runefile.h, collate.h),
+# so a host build writes what the target's would.  <sys/tree.h> wants a
+# struct spinlock type (unused outside the kernel), and the _CTYPE_* bits
+# come from the fork's <ctype.h>.
+e="$SRC/usr.bin/localedef"
+o="$OUT/build/localedef"
+echo "==> localedef"
+rm -rf "$o"; mkdir -p "$o/sys"
+cp "$SRC/sys/sys/tree.h" "$o/sys/"
+printf '#define\t_SYS_SPINLOCK_H_\nstruct spinlock { int lock; };\n#define\tSPINLOCK_INITIALIZER(h, d)\t{ 0 }\n' \
+    > "$o/sys/spinlock.h"
+grep -E '^#define[[:space:]]+_CTYPE_[A-Z0-9]+[[:space:]]' "$SRC/include/ctype.h" \
+    > "$o/ctype_bsd.h"
+bison -y -d -o "$o/parser.c" "$e/parser.y"
+XF="-include $o/ctype_bsd.h -DBOOTSTRAPPING -I$o -I$e \
+    -I$SRC/lib/libc/locale -I$SRC/lib/libc/stdtime"
+hcomp "$o/obj" "$o/parser.c" "$e"/charmap.c "$e"/collate.c "$e"/ctype.c \
+    "$e"/localedef.c "$e"/messages.c "$e"/monetary.c "$e"/numeric.c \
+    "$e"/scanner.c "$e"/time.c "$e"/wide.c
+$CC -o "$BIN/localedef" "$o"/obj/*.o
+
+# --- mkcsmapper, mkesdb ------------------------------------------------------
+# Citrus writes its databases big-endian explicitly.
+c="$SRC/lib/libc/citrus"
+for t in mkcsmapper mkesdb; do
+    o="$OUT/build/$t"
+    echo "==> $t"
+    rm -rf "$o"; mkdir -p "$o"
+    "$BIN/yacc" -d -o "$o/yacc.c" "$SRC/usr.bin/$t/yacc.y"
+    flex -o "$o/lex.c" "$SRC/usr.bin/$t/lex.l"
+    pf="$c/citrus_pivot_factory.c"
+    [ $t = mkesdb ] && pf=
+    XF="-I$o -I$SRC/usr.bin/$t -I$SRC/lib/libc -I$c -I$SRC/lib/i18n_module/mapper_std"
+    hcomp "$o/obj" "$o/yacc.c" "$o/lex.c" "$c/citrus_bcs.c" \
+        "$c/citrus_db_factory.c" "$c/citrus_db_hash.c" \
+        "$c/citrus_lookup_factory.c" $pf "$l/hostlib.c"
+    $CC -o "$BIN/$t" "$o"/obj/*.o
+done
 
 echo "==> host tools in $BIN:"
 ls "$BIN"

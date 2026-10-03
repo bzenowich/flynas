@@ -12,6 +12,10 @@
 # Options (-jN, VAR=value) may be mixed in with the targets; keep -j2 here.
 # ARM_SHARED=1 in the environment builds PIC and shared objects too (rtld,
 # shared libs); the default is static only (NOPIC, NOSHARED).
+# ARM_DESTDIR=ROOT installs into ROOT instead of the sysroot (used by
+# bin/arm-installworld), and the install shim then appends each file's
+# owner, group and mode to $ARM_DESTDIR.metalog: the build is unprivileged,
+# so the image's ownership comes from that log.
 set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
@@ -71,18 +75,23 @@ for t in nm objcopy objdump size readelf ar ranlib strip strings; do
 done
 cat > "$UB/install" <<'EOI'
 #!/bin/sh
-# BSD install(1) shim: owner/group/flags are ignored (unprivileged sysroot),
-# -s strips with llvm-strip, -l (link) is done with ln.
-args= lnk=
+# BSD install(1) shim: owner/group/flags are not applied (unprivileged),
+# -s strips with llvm-strip, -l (link) is done with ln.  With $ARM_METALOG
+# set, "path owner group mode" goes there for each target, for the image.
+args= lnk= own= grp= mode= dir=
 while [ $# -gt 0 ]; do
     case "$1" in
-    -o|-g|-f|-B) shift ;;
-    -f?*|-B?*|-o?*|-g?*) ;;
+    -o) own="$2"; shift ;;
+    -g) grp="$2"; shift ;;
+    -o?*) own="${1#-o}" ;;
+    -g?*) grp="${1#-g}" ;;
+    -f|-B) shift ;;
+    -f?*|-B?*) ;;
     -C|-S|-p|-c|-U|-v|-b) ;;
     -s) args="$args -s --strip-program=llvm-strip-18" ;;
     -l) lnk="$2"; shift ;;
-    -m) args="$args -m $2"; shift ;;
-    -d) args="$args -d" ;;
+    -m) mode="$2"; args="$args -m $2"; shift ;;
+    -d) dir=1; args="$args -d" ;;
     -*) echo "install shim: unknown flag $1" >&2; exit 1 ;;
     *) break ;;
     esac
@@ -91,7 +100,18 @@ done
 if [ -n "$lnk" ]; then
     case "$lnk" in *s*) exec ln -sfn "$@" ;; *) exec ln -fn "$@" ;; esac
 fi
-exec /usr/bin/install $args "$@"
+/usr/bin/install $args "$@" || exit
+[ -n "$ARM_METALOG" ] && [ -n "$own$grp$mode" ] || exit 0
+if [ -n "$dir" ]; then
+    for t; do echo "$t ${own:--} ${grp:--} ${mode:--}"; done
+else
+    eval "t=\${$#}"
+    if [ -d "$t" ]; then
+        while [ $# -gt 1 ]; do echo "$t/${1##*/} ${own:--} ${grp:--} ${mode:--}"; shift; done
+    else
+        echo "$t ${own:--} ${grp:--} ${mode:--}"
+    fi
+fi >> "$ARM_METALOG"
 EOI
 chmod +x "$UB/install"
 # File flags (schg) don't exist in the sysroot.
@@ -115,6 +135,52 @@ shift
 /usr/bin/find "$@" | LC_ALL=C sort
 EOI
 chmod +x "$UB/find"
+# mtree -deU -f SPEC -p DIR (include's mtree_setup): create the directory
+# tree; owners and modes are bin/arm-mkimg's business.
+cat > "$UB/mtree" <<'EOI'
+#!/bin/sh
+spec= dir=.
+while getopts deUf:p:L opt; do
+    case $opt in f) spec=$OPTARG ;; p) dir=$OPTARG ;; esac
+done
+[ -n "$spec" ] || { echo "mtree shim: only -deU -f SPEC -p DIR" >&2; exit 1; }
+awk -v top="$dir" '/^#|^\/|^[ \t]*$/ { next }
+    $1 == "." { n = 0; next }
+    $1 == ".." { n--; next }
+    { d[++n] = $1; p = top; for (i = 1; i <= n; i++) p = p "/" d[i]; print p }' "$spec" |
+    xargs mkdir -p
+EOI
+chmod +x "$UB/mtree"
+# cpdup [-flags] SRC DST (include's machine/ copy): a tree copy.
+cat > "$UB/cpdup" <<'EOI'
+#!/bin/sh
+while [ $# -gt 2 ]; do shift; done
+mkdir -p "$2" && cp -a "$1/." "$2/"
+EOI
+chmod +x "$UB/cpdup"
+# uudecode (share/tabset): stdin to the file its "begin" line names.
+cat > "$UB/uudecode" <<'EOI'
+#!/usr/bin/env python3
+import binascii, os, sys
+src = open(sys.argv[-1], 'rb') if len(sys.argv) > 1 else sys.stdin.buffer
+for line in src:
+    if line.startswith(b'begin '):
+        _, mode, name = line.split(None, 2)
+        break
+out = bytearray()
+for line in src:
+    if line.strip() == b'end':
+        break
+    if line.strip():
+        # Lines may carry padding past their length byte.
+        n = (((line[0] - 32) & 63) * 4 + 5) // 3
+        out += binascii.a2b_uu(line[:n])
+name = name.strip().decode()
+with open(name, 'wb') as f:
+    f.write(out)
+os.chmod(name, int(mode, 8))
+EOI
+chmod +x "$UB/uudecode"
 # Scripts run "gcc" as DragonFly's system compiler (kdump's mkioctls
 # runs gcc -E over the target headers): that is the target cc here.
 ln -sf cc "$UB/gcc"
@@ -130,11 +196,66 @@ chmod +x "$UB/lorder" "$UB/tsort"
 HINC="$REPO/tools/host/hinc"
 mkdir -p "$HINC"
 printf '#include <locale.h>\n' > "$HINC/xlocale.h"
+mkdir -p "$HINC/sys"
+printf '#include <endian.h>\n#include <byteswap.h>\n#define\tbswap16(x)\tbswap_16(x)\n#define\tbswap32(x)\tbswap_32(x)\n#define\tbswap64(x)\tbswap_64(x)\n' \
+    > "$HINC/sys/endian.h"
 # ...and <sys/cdefs.h> macros that glibc's lacks, pre-included.
 cat > "$HINC/bsdhost.h" <<'EOI'
 #ifndef __DECONST
 #define	__DECONST(type, var)	((type)(unsigned long)(const void *)(var))
 #endif
+#ifndef __dead2
+#define	__dead2		__attribute__((__noreturn__))
+#endif
+#ifndef __printflike
+#define	__printflike(f, a) __attribute__((__format__(__printf__, f, a)))
+#endif
+#ifndef __printf0like
+#define	__printf0like(f, a)
+#endif
+#ifndef __unused
+#define	__unused	__attribute__((__unused__))
+#endif
+#include <errno.h>
+#include <stdlib.h>
+/* strtonum(3), for glibc (games/boggle's mkdict). */
+static __inline __attribute__((__unused__)) long long
+strtonum(const char *s, long long min, long long max, const char **errstrp)
+{
+	long long v;
+	char *ep;
+
+	errno = 0;
+	if (min > max) {
+		errno = EINVAL;
+		*errstrp = "invalid";
+		return (0);
+	}
+	v = strtoll(s, &ep, 10);
+	if (ep == s || *ep != '\0') {
+		errno = EINVAL;
+		*errstrp = "invalid";
+		return (0);
+	}
+	if (errno == ERANGE || v < min || v > max) {
+		errno = ERANGE;
+		*errstrp = v < min ? "too small" : "too large";
+		return (0);
+	}
+	*errstrp = NULL;
+	return (v);
+}
+#include <sys/random.h>
+/* srandomdev(3) (games/phantasia's setup). */
+static __inline __attribute__((__unused__)) void
+srandomdev(void)
+{
+	unsigned int seed;
+
+	if (getentropy(&seed, sizeof(seed)) != 0)
+		seed = (unsigned int)(unsigned long)&seed;
+	srandom(seed);
+}
 EOI
 
 export PATH="$UB:$HOSTBIN:$PATH"
@@ -150,16 +271,22 @@ for t in $targets; do case "$t" in -*|*=*) flags="$flags $t" ;; *) tgts="$tgts $
 case " $tgts " in *" obj "*) ;; *) tgts="obj $tgts" ;; esac
 static="NOSHARED=yes NOPIC=yes"
 [ "${ARM_SHARED:-0}" = 1 ] && static=
+dest="$SYSROOT" own="BINOWN=$(id -un) BINGRP=$(id -gn)"
+if [ -n "${ARM_DESTDIR:-}" ]; then
+    dest="$ARM_DESTDIR" own=
+    export ARM_METALOG="$ARM_DESTDIR.metalog"
+fi
 for t in $tgts; do
 bmake -m "$SRC/share/mk" \
     MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
     CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
     CC=cc CPP="cc -E" CXX=c++ LD=ld AR=ar RANLIB=ranlib NM=nm \
     OBJCOPY=objcopy OBJDUMP=objdump SIZE=size STRIP=-s INSTALL=install \
-    DESTDIR="$SYSROOT" _SHLIBDIRPREFIX="$SYSROOT" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes GENCAT="$HOSTBIN/gencat" \
-    BINOWN=$(id -un) BINGRP=$(id -gn) "CROSS_CFLAGS=-idirafter $HINC -include $HINC/bsdhost.h" \
+    DESTDIR="$dest" _SHLIBDIRPREFIX="$dest" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes GENCAT="$HOSTBIN/gencat" \
+    $own ZIC_UG_FLAGS= "CROSS_CFLAGS=-idirafter $HINC -include $HINC/bsdhost.h" \
     $flags $t
 done
+[ -z "${ARM_DESTDIR:-}" ] || exit 0	# in an image, absolute links are right
 # Installed symlinks are absolute (/lib/libc.so.8), which on the host points
 # outside the sysroot: make them relative to it.
 # Links made with _SHLIBDIRPREFIX already name the sysroot.
