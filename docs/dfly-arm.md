@@ -3,8 +3,9 @@
 Status: **Phase 3 (SMP) is working** (2026-10-02). On QEMU `virt`, `-smp 1`,
 `2` and `4` boot to a static aarch64 `/sbin/init` from an md root, and a
 boot-time SMP stress test passes on 4 CPUs. The literal Phase 3 exit test
-(hours of `make -j8`) waits for userland. Signals and the remaining Phase 2
-hazards are still open (see Phase 2). Phase 4 (userland) is next.
+(hours of `make -j8`) waits for userland. Signals, a W^X kernel image, DMAP
+memory attributes and kernel module loading are done too (see Phase 2).
+Phase 4 (userland) is next.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -614,14 +615,53 @@ static ELF that does a `write` syscall and `exit`.
   - **Console.** `/dev/console` forwards to `ttyu0`, a write-only polled
     device in `early_uart.c`, until the PL011 gets a tty driver (Phase 5).
     `inittodr` reads the PL031 when the DTB has one.
-- **Open hazards / not done:**
-  - `sendsig`/`sigreturn`/sigcode (`sigcode` is a 4-byte placeholder), ptrace and procfs registers.
-  - The DMAP attribute is not changed by `page_set_memattr`.
-  - The kernel image is mapped RWX.
-  - `pmap_object_init_pt` is a no-op.
-  - The free pages at the 2MB tail of the kernel image are also reachable through KERNBASE.
-  - Kernel module relocation (`elf_reloc`) is still a stub.
-  - The x86_64 rebuild in h2dev for the MI header changes has not been run.
+- **Hazards closed after the exit test (2026-10-02):**
+  - **Signals** (fork `f3e8ad4ef0`).
+    - `sigtramp.s` holds the sigcode: `blr x8` to the handler, then
+      `sigreturn(&sf_uc)`, falling back to `exit`.
+    - `sendsig` puts the handler's arguments in x0–x3: signo, siginfo or
+      code, ucontext, fault address.
+    - The FP/SIMD state is part of the mcontext (`_MC_FPFMT_VFP`).
+    - `sys_sigreturn` takes only the NZCV flags from the user's SPSR, and
+      refuses anything that is not EL0t AArch64 with the current DAIF.
+    - ptrace and procfs `fill/set_regs` and `fpregs` are implemented.
+      Debug registers and `PT_STEP` return EINVAL.
+    - `tools/arm-smoke/sigtest.c`, run as `/sbin/init`, checks:
+      - registers and FP state survive a handler;
+      - a SIGSEGV is resumed through an edited context;
+      - a forged EL1 SPSR is refused.
+  - **W^X kernel image** (`051061883d`).
+    - The ldscript puts `_kdata` on the 2MB boundary after the RO segment.
+      Blocks below it are RO, and only they are executable.
+    - The sysinit sets moved to data, because `mi_startup` sorts them in
+      place.
+    - The 2MB tail of the last block is not given to the VM, so no free
+      page is aliased through KERNBASE.
+    - A kernel fault on the image or the DMAP is now fatal; before, it went
+      to `vm_fault`.
+    - The DMAP still has a writable alias of the text, as on FreeBSD.
+  - **DMAP memory attributes.**
+    - `pmap_page_set_memattr` and `pmap_change_attr` now change the DMAP
+      too. They split 1GB/2MB blocks with break-before-make, and
+      `pmap_dmap_fault()` retries the faults that other CPUs take during
+      the gap.
+    - `vm_page_alloc_contig` (MI) now resets the attribute of reused pages.
+    - `smp_stress` flips a DMAP range UC↔WB while the other CPUs read it.
+  - **Kernel modules** (`6bfd5cc205`).
+    - `elf_reloc` handles the static relocations of ET_REL modules, for
+      both the small and the large code model, with range checks.
+    - `link_elf_obj` syncs the icache after relocating.
+    - **Found along the way:** the arm64 `pmap_enter` did not do the
+      `vm_page_wire()` that x86's does and `vm_fault` depends on. So
+      kernel-wired memory was not wired at all, and `pmap_unwire` did not
+      advance `*pva`. Both are fixed.
+    - `tools/arm-smoke/kmodtest/` is a module that checks every relocation
+      type, plus an init that loads and unloads it.
+  - `pmap_object_init_pt` stays a no-op. It is only a prefault
+    optimization, not a hazard.
+- **Still open:**
+  - The x86_64 rebuild in h2dev for the MI changes (headers,
+    `vm_page_alloc_contig`, `link_elf_obj`) has not been run.
 - **Debugging aids:**
   - `bin/arm-vm -a "-v ..."` boots verbose.
   - With no gdb on the host, start QEMU with `-monitor unix:...` and poll
@@ -756,7 +796,7 @@ static ELF that does a `write` syscall and `exit`.
   allocator and `libc/gen/tls.c`.
 - `libm` aarch64 (FreeBSD `msun/aarch64`), `libkvm`, `libstand` and anything
   `MACHINE_ARCH`-gated in `lib/`, `bin/`, `sbin/`, `usr.bin/`, `usr.sbin/`.
-- **Kernel side:**
+- **Kernel side** (done, see Phase 2):
   - `sendsig`/`sigreturn` with a `sigframe` containing `ucontext` and `fpregs`.
   - `exec_setregs`, ptrace `fill/set_regs`, `sigtramp` in `sigcode`.
   - `cpu_sanitize_frame` checks SPSR: EL0 only, DAIF cleared.
@@ -1160,9 +1200,9 @@ DragonFly hardware.
 4. ~~Do Phase 1: headers, `locore.S`, PL011 early console, banner on QEMU.~~
    Done 2026-10-02 (see Phase 1).
    Phase 2's exit test passed on 2026-10-02 (see Phase 2), and Phase 3
-   (SMP) works on QEMU with up to 4 CPUs (see Phase 3). Next:
-   - signals (`sendsig`, `sigreturn`, sigcode);
-   - the Phase 2 hazards;
+   (SMP) works on QEMU with up to 4 CPUs (see Phase 3). Signals and the
+   Phase 2 hazards are done. Next:
+   - the x86_64 h2dev rebuild for the MI changes;
    - Phase 4a (cross-built static `init` + `sh`), which needs a PL011 tty
      driver for an interactive shell; then the Phase 3 exit test under
      real load.
