@@ -659,9 +659,9 @@ static ELF that does a `write` syscall and `exit`.
       type, plus an init that loads and unloads it.
   - `pmap_object_init_pt` stays a no-op. It is only a prefault
     optimization, not a hazard.
-- **Still open:**
-  - The x86_64 rebuild in h2dev for the MI changes (headers,
-    `vm_page_alloc_contig`, `link_elf_obj`) has not been run.
+- **x86_64 check** (2026-10-02): `bin/arm-x86build build` of fork
+  `6bfd5cc205` (all MI changes up to here) builds `X86_64_GENERIC` in h2dev,
+  and `boottest` boots it to multi-user.
 - **Debugging aids:**
   - `bin/arm-vm -a "-v ..."` boots verbose.
   - With no gdb on the host, start QEMU with `-monitor unix:...` and poll
@@ -1201,8 +1201,8 @@ DragonFly hardware.
    Done 2026-10-02 (see Phase 1).
    Phase 2's exit test passed on 2026-10-02 (see Phase 2), and Phase 3
    (SMP) works on QEMU with up to 4 CPUs (see Phase 3). Signals and the
-   Phase 2 hazards are done. Next:
-   - the x86_64 h2dev rebuild for the MI changes;
+   Phase 2 hazards are done, and the MI changes build and boot on x86_64.
+   Next:
    - Phase 4a (cross-built static `init` + `sh`), which needs a PL011 tty
      driver for an interactive shell; then the Phase 3 exit test under
      real load.
