@@ -6,4 +6,5 @@ tools/*
 tools/uitest/node_modules/
 ui/reference/
 !tools/arm-smoke/
+!tools/llvm/
 logs/

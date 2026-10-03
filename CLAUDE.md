@@ -42,7 +42,7 @@ Use these instead of ad-hoc ssh/scp:
 | `bin/logs {flynas\|master\|access\|vm <name>\|console} [-f]` | Tail the right log |
 | `bin/vm {status\|wait\|reset\|reboot\|coldboot\|stop\|save\|load\|snapshots\|console\|attach\|log}` | Control h2dev via the hammer2-raid6 harness (anything else is passed through to its `vmctl.sh`) |
 | `bin/fresh-install [check\|push\|install\|start\|all]` | Run `install.sh` onto a freshly-reset guest and verify it — the only thing that exercises the install path (`bin/deploy` assumes FlyNAS is already there) |
-| `bin/arm-hosttools` | arm64 port: build bmake/config(8)/mkdep for Linux from `../dragonfly` into `tools/host/bin` |
+| `bin/arm-hosttools` | arm64 port: build bmake/config(8)/mkdep/gencat for Linux from `../dragonfly` into `tools/host/bin` |
 | `bin/arm-kbuild [KERNCONF] [targets]` | arm64 port: cross-build the aarch64 kernel on the host (clang-18 + `tools/lld`), objects in `tools/kobj/` |
 | `bin/arm-vm [-g] [-s N] [-t SECS] [KERNEL]` | arm64 port: boot an aarch64 kernel on QEMU `virt` (Cortex-A72, GICv2); always TCG, timeout on by default |
 | `bin/arm-mkiso OUT DIR` | arm64 port: write a plain ISO 9660 md root (lowercase names) for `bin/arm-vm -r` |

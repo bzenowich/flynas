@@ -1,0 +1,136 @@
+diff --git a/lib/Basic/Targets.cpp b/lib/Basic/Targets.cpp
+index e328351..d2c5f84 100644
+--- a/lib/Basic/Targets.cpp
++++ b/lib/Basic/Targets.cpp
+@@ -142,6 +142,9 @@ std::unique_ptr<TargetInfo> AllocateTarget(const llvm::Triple &Triple,
+       return std::make_unique<DarwinAArch64TargetInfo>(Triple, Opts);
+ 
+     switch (os) {
++    case llvm::Triple::DragonFly:
++      return std::make_unique<DragonFlyBSDTargetInfo<AArch64leTargetInfo>>(
++          Triple, Opts);
+     case llvm::Triple::FreeBSD:
+       return std::make_unique<FreeBSDTargetInfo<AArch64leTargetInfo>>(Triple,
+                                                                       Opts);
+diff --git a/lib/Basic/Targets/OSTargets.h b/lib/Basic/Targets/OSTargets.h
+index 4366c11..eed78e5 100644
+--- a/lib/Basic/Targets/OSTargets.h
++++ b/lib/Basic/Targets/OSTargets.h
+@@ -148,7 +148,8 @@ protected:
+     Builder.defineMacro("__DragonFly__");
+     Builder.defineMacro("__DragonFly_cc_version", "100001");
+     Builder.defineMacro("__KPRINTF_ATTRIBUTE__");
+-    Builder.defineMacro("__tune_i386__");
++    if (Triple.isX86())
++      Builder.defineMacro("__tune_i386__");
+     DefineStd(Builder, "unix", Opts);
+     if (this->HasFloat128)
+       Builder.defineMacro("__FLOAT128__");
+@@ -164,6 +165,10 @@ public:
+       this->HasFloat128 = true;
+       this->MCountName = ".mcount";
+       break;
++    case llvm::Triple::aarch64:
++      // long double is already IEEE quad.
++      this->MCountName = ".mcount";
++      break;
+     }
+   }
+ };
+diff --git a/lib/Driver/ToolChains/DragonFly.cpp b/lib/Driver/ToolChains/DragonFly.cpp
+index 9942fc6..418302e 100644
+--- a/lib/Driver/ToolChains/DragonFly.cpp
++++ b/lib/Driver/ToolChains/DragonFly.cpp
+@@ -129,7 +129,8 @@ void dragonfly::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+ 
+   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
+                    options::OPT_r)) {
+-    if (!Static) {
++    // The base gcc's runtime (x86 only: aarch64 has no base gcc).
++    if (!Static && ToolChain.getTriple().isX86()) {
+       CmdArgs.push_back("-rpath");
+       CmdArgs.push_back("/usr/lib/gcc80");
+     }
+@@ -213,7 +214,8 @@ DragonFly::DragonFly(const Driver &D, const llvm::Triple &Triple,
+ 
+   getFilePaths().push_back(getDriver().Dir + "/../lib");
+   getFilePaths().push_back(concat(getDriver().SysRoot, "/usr/lib"));
+-  getFilePaths().push_back(concat(getDriver().SysRoot, "/usr/lib/gcc80"));
++  if (Triple.isX86())
++    getFilePaths().push_back(concat(getDriver().SysRoot, "/usr/lib/gcc80"));
+ }
+ 
+ void DragonFly::AddClangSystemIncludeArgs(
+@@ -224,19 +226,48 @@ void DragonFly::AddClangSystemIncludeArgs(
+   if (DriverArgs.hasArg(clang::driver::options::OPT_nostdinc))
+     return;
+ 
+-  if (!DriverArgs.hasArg(options::OPT_nobuiltininc)) {
+-    SmallString<128> Dir(D.ResourceDir);
+-    llvm::sys::path::append(Dir, "include");
+-    addSystemInclude(DriverArgs, CC1Args, Dir.str());
++  SmallString<128> Dir(D.ResourceDir);
++  llvm::sys::path::append(Dir, "include");
++  bool Builtin = !DriverArgs.hasArg(options::OPT_nobuiltininc);
++  bool Std = !DriverArgs.hasArg(options::OPT_nostdlibinc);
++
++  // On aarch64 clang is the base compiler, and DragonFly's own <stddef.h>,
++  // <float.h> and friends are complete (the base gcc ships none): they
++  // come first, as for gcc, and the resource directory only adds what
++  // the base headers lack (intrinsics such as <arm_neon.h>).
++  if (getTriple().getArch() == llvm::Triple::aarch64) {
++    if (Std)
++      addExternCSystemInclude(DriverArgs, CC1Args,
++                              concat(D.SysRoot, "/usr/include"));
++    if (Builtin)
++      addSystemInclude(DriverArgs, CC1Args, Dir.str());
++    return;
+   }
+ 
+-  if (DriverArgs.hasArg(options::OPT_nostdlibinc))
++  if (Builtin)
++    addSystemInclude(DriverArgs, CC1Args, Dir.str());
++
++  if (!Std)
+     return;
+ 
+   addExternCSystemInclude(DriverArgs, CC1Args,
+                           concat(D.SysRoot, "/usr/include"));
+ }
+ 
++ToolChain::CXXStdlibType
++DragonFly::GetDefaultCXXStdlibType() const {
++  // aarch64 has no base gcc, hence no base libstdc++.
++  if (getTriple().getArch() == llvm::Triple::aarch64)
++    return ToolChain::CST_Libcxx;
++  return ToolChain::CST_Libstdcxx;
++}
++
++void DragonFly::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
++                                      llvm::opt::ArgStringList &CC1Args) const {
++  addSystemInclude(DriverArgs, CC1Args,
++                   concat(getDriver().SysRoot, "/usr/include/c++/v1"));
++}
++
+ void DragonFly::addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                          llvm::opt::ArgStringList &CC1Args) const {
+   addLibStdCXXIncludePaths(concat(getDriver().SysRoot, "/usr/include/c++/8.0"), "", "",
+diff --git a/lib/Driver/ToolChains/DragonFly.h b/lib/Driver/ToolChains/DragonFly.h
+index 715f6b4..28159db 100644
+--- a/lib/Driver/ToolChains/DragonFly.h
++++ b/lib/Driver/ToolChains/DragonFly.h
+@@ -56,9 +56,14 @@ public:
+ 
+   bool IsMathErrnoDefault() const override { return false; }
+ 
++  CXXStdlibType GetDefaultCXXStdlibType() const override;
++
+   void
+   AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                             llvm::opt::ArgStringList &CC1Args) const override;
++  void addLibCxxIncludePaths(
++      const llvm::opt::ArgList &DriverArgs,
++      llvm::opt::ArgStringList &CC1Args) const override;
+   void addLibStdCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+       llvm::opt::ArgStringList &CC1Args) const override;

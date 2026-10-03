@@ -1084,12 +1084,36 @@ with `sshd`.
     and steps through exception trapframes.
   - Boot tunable `debug.panic_test=1|2` tests it.
   - `tools/arm-smoke/ksym.sh LOG` symbolizes the output.
+- **buildworld hookup (fork `d504cd1f73`):**
+  - On aarch64, `Makefile.inc1` builds `_startup_libsrt`
+    (`lib/libcompiler_rt`, `lib/libgcc_eh`) in place of
+    `gnu/lib/gcc80/*`.
+  - No gcc is cross-built: the compiler is external clang.
+  - `gnu/lib` skips gcc80/gcc120, and `lib/` lists the two directories.
+  - `bmake -V` shows the x86_64 lists unchanged.
+  - Untested as a real buildworld, which needs a DragonFly host. The
+    cross-tools list still names GNU binutils.
+- **NLS:**
+  - `bin/arm-hosttools` builds the fork's own `usr.bin/gencat` for Linux.
+    glibc's gencat writes an incompatible format; the BSD format is
+    big-endian, so it is the same on any host.
+  - `arm-world` passes `GENCAT=` and no longer sets `NO_NLS`.
+  - libc's 26 catalogs build and install.
+- **Clang target patch (`tools/llvm/`):**
+  - `clang-18-dragonfly-aarch64.patch`, 4 files, +52/−8, against clang
+    18.1.3.
+  - The patch adds `DragonFlyBSDTargetInfo<AArch64leTargetInfo>`.
+  - `__tune_i386__` is x86-only.
+  - gcc80 paths are x86-only.
+  - On aarch64, `/usr/include` comes before the resource headers, and the
+    default C++ library is libc++.
+  - Checked without a full LLVM build: only clangBasic and clangDriver are
+    built (245 steps), linked to the host `libLLVM-18.so`, and
+    `tools/llvm/dftest.cpp` prints the predefines and the driver jobs.
+  - x86_64 output is unchanged.
+  - See `tools/llvm/README.md`. The `cc` shim stays until a patched clang
+    is installed.
 - **Still open for 4b:**
-  - Hook csu, libcompiler_rt and libgcc_eh into buildworld.
-  - NLS.
-  - The Clang target patch.
-  - Rebuild all of `lib/` once with the final headers. Libraries built
-    before the include-order and atomics changes are stale.
   - The rest of world (`bin`, `sbin`, `usr.*`), then the Phase 3 exit test
     under load.
   - x86 check, done 2026-10-03 at fork `1496798ba5`:

@@ -6,6 +6,8 @@
 #           in-tree, so it is compiled directly with usr.bin/bmake's defines)
 #   config  usr.sbin/config (config(8); needs bison/flex, yywrap stub for -ll)
 #   mkdep   usr.bin/mkdep/mkdep.sh
+#   gencat  usr.bin/gencat (BSD catalog format, big endian; glibc's gencat
+#           writes its own incompatible format)
 #
 #   bin/arm-hosttools          build (re-run after pulling upstream)
 #   bin/arm-hosttools --clean  remove tools/host
@@ -47,6 +49,16 @@ $CC -O2 -w -D_GNU_SOURCE -I"$o" -I"$c" "$o/y.tab.c" "$o/lang.c" "$o/yywrap.c" \
 # --- mkdep -----------------------------------------------------------------
 echo "==> mkdep"
 install -m 755 "$SRC/usr.bin/mkdep/mkdep.sh" "$BIN/mkdep"
+
+# --- gencat ----------------------------------------------------------------
+# Needs DragonFly's <nl_types.h> for the _NLS_PRIVATE catalog layout.
+g="$OUT/build/gencat"
+echo "==> gencat"
+mkdir -p "$g"
+sed 's|<machine/stdint.h>|<stdint.h>|' "$SRC/include/nl_types.h" > "$g/nl_types.h"
+$CC -O2 -w -D_GNU_SOURCE -include errno.h '-D__dead2=__attribute__((__noreturn__))' \
+    '-Dgetprogname()=program_invocation_short_name' -I"$g" \
+    "$SRC/usr.bin/gencat/gencat.c" -o "$BIN/gencat"
 
 echo "==> host tools in $BIN:"
 ls "$BIN"

@@ -40,8 +40,8 @@ mtree_dirs() {
 # The clang driver links -lgcc_eh: an empty one until lib/libgcc_eh is built.
 [ -f "$SYSROOT/usr/lib/libgcc_eh.a" ] || llvm-ar-18 rc "$SYSROOT/usr/lib/libgcc_eh.a"
 
-# Binutils names map to LLVM.  Static by default (NOPIC, NOSHARED), and no
-# NLS catalogs (they need BSD gencat).  install(1) is BSD-flavoured in the makefiles
+# Binutils names map to LLVM.  Static by default (NOPIC, NOSHARED).  NLS
+# catalogs use the BSD gencat from bin/arm-hosttools.  install(1) is BSD-flavoured in the makefiles
 # (-o/-g owner, -C, -S safe copy, -s strip): drop what GNU install lacks.
 mkdir -p "$UB"
 # The compiler: clang-18 has no aarch64 DragonFly target info, so the OS
@@ -157,7 +157,7 @@ bmake -m "$SRC/share/mk" \
     CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
     CC=cc CPP="cc -E" CXX=c++ LD=ld AR=ar RANLIB=ranlib NM=nm \
     OBJCOPY=objcopy OBJDUMP=objdump SIZE=size STRIP=-s INSTALL=install \
-    DESTDIR="$SYSROOT" _SHLIBDIRPREFIX="$SYSROOT" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes NO_NLS=yes \
+    DESTDIR="$SYSROOT" _SHLIBDIRPREFIX="$SYSROOT" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes GENCAT="$HOSTBIN/gencat" \
     BINOWN=$(id -un) BINGRP=$(id -gn) "CROSS_CFLAGS=-idirafter $HINC -include $HINC/bsdhost.h" \
     $flags $t
 done
