@@ -9,7 +9,7 @@
  *   makecontext / swapcontext, fork + pipe + waitpid, pthread_create with
  *   __thread variables (TLS variant I).
  *
- * Build: tools/arm-smoke/build-libctest.sh OUT
+ * Build: tools/arm-smoke/build-utest.sh libctest OUT
  */
 #include <sys/types.h>
 #include <sys/wait.h>

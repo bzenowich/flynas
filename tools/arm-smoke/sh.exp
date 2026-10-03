@@ -1,7 +1,8 @@
-# vmexpect.py script for a root with the cross-built /sbin/init, /bin/sh and
-# /bin/libctest (see dfly-arm.md Phase 4a).  There is no /etc/rc, so init
-# drops to single-user and asks for a shell.  The terminal echoes each
-# command, so no expect string appears literally in the line sent.
+# vmexpect.py script for a root with the cross-built /sbin/init, /bin/sh,
+# /bin/libctest and /bin/libmtest (see dfly-arm.md Phase 4).  There is no
+# /etc/rc, so init drops to single-user and asks for a shell.  The terminal
+# echoes each command, so no expect string appears literally in the line
+# sent.
 expect Enter full pathname of shell or RETURN for /bin/sh:
 send \r
 expect #
@@ -19,6 +20,9 @@ expect dir=/bin
 send /bin/libctest; echo "libctest rc=$?"\r
 expect libctest: PASS
 expect libctest rc=0
+send /bin/libmtest; echo "libmtest rc=$?"\r
+expect libmtest: PASS
+expect libmtest rc=0
 send while :; do :; done\r
 send \x03
 send echo "after $((1 + 1)) intr"\r
