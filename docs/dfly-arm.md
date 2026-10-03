@@ -1183,6 +1183,11 @@ with `sshd`.
     - The rtld link (`-lc_rtld_pic`) and `libkvm` (master's
       `machine/pat.h`) need a master buildworld, which the 6.4 guest
       doesn't have. Recheck them with the first full x86 buildworld.
+  - x86 check of the world changes, 2026-10-03 at fork `91f2c9cb09`:
+    gcc 8.3 `-Werror` in h2dev compiles every object of ktrdump,
+    newfs_msdos, grep, top, getconf, xz, truss and rtld-elf (with the
+    TLS offset fix). xz's link wants master's libc (`pthread_create`),
+    like rtld's. No MI kernel code changed since `1496798ba5`.
 
 ### Phase 5 — FDT, newbus and generic devices (≈3–5 wk)
 
