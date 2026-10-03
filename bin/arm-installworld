@@ -46,9 +46,10 @@ ln -s C "$ROOT/usr/share/nls/en_US.US-ASCII"
 for d in libexec include lib bin games gnu sbin share usr.bin usr.sbin etc; do
     echo "==> $d"
     echo "==> $d" >> "$LOG"
-    j=-j2
-    [ $d = etc ] && j=	# etc/sendmail's files are installed twice: they race
-    ARM_SHARED=1 ARM_DESTDIR="$ROOT" "$REPO/bin/arm-world" "$d" install $j \
+    # Serial: under -j, realinstall races installfiles/installincludes,
+    # which install the same files (etc/sendmail, share/examples,
+    # include/rpcsvc).  Installing is mostly copying anyway.
+    ARM_SHARED=1 ARM_DESTDIR="$ROOT" "$REPO/bin/arm-world" "$d" install \
         >> "$LOG" 2>&1 || { echo "install failed in $d, see $LOG" >&2; exit 1; }
 done
 echo "==> etc distribution"

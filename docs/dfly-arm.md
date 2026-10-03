@@ -11,8 +11,11 @@ interactively (see Phase 4, Progress). In 4b, libm, rtld and shared
 libc/libm work (2026-10-03, dynamic programs with shared-library TLS and
 dlopen pass on QEMU). **4b is done** (2026-10-03): the whole world except
 `devd` cross-builds, and the Phase 3 exit test passed under load (1.5 h
-of `make -j8` plus dltest loops on 4 cpus). Next: a multi-user boot, then
-Phase 5.
+of `make -j8` plus dltest loops on 4 cpus). **Phase 4 is done**
+(2026-10-03): the world builds from clean on the Linux host, installs into
+a UFS image, and boots on QEMU to multi-user with rc, getty, devd and
+sshd. libc++ and libcxxrt (from FreeBSD) give aarch64 its C++ runtime
+(see Progress 4c). Next: Phase 5.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1173,7 +1176,7 @@ with `sshd`.
   - Result: `make-fail=0 hung-a=0 hung-b=0`. It ran 1 h 27 min under
     TCG, about 35 s per round.
 - **Still open for 4b:**
-  - `sbin/devd` (C++).
+  - `sbin/devd` (C++): done in 4c with libc++.
   - x86 check, done 2026-10-03 at fork `1496798ba5`:
     - `bin/arm-x86build build` + `boottest`: the x86_64 kernel builds
       and boots.
@@ -1188,6 +1191,98 @@ with `sshd`.
     newfs_msdos, grep, top, getconf, xz, truss and rtld-elf (with the
     TLS offset fix). xz's link wants master's libc (`pthread_create`),
     like rtld's. No MI kernel code changed since `1496798ba5`.
+
+#### Progress 4c: installworld, multi-user, libc++ (2026-10-03)
+
+- **Phase 4 exit test: passed.** The world builds from clean on the
+  Linux host (`bin/arm-buildworld`, 726 directories in 18 min at `-j2`; `share/` installs serially because its `FILES` install targets race under `-j`). It installs into an
+  image root (`bin/arm-installworld`), becomes a root-owned UFS image
+  (`bin/arm-mkimg`), and boots on QEMU `virt` to multi-user with `sshd`.
+  - `make buildworld` itself does not run on Linux: Makefile.inc1's
+    bootstrap and cross-tools stages assume a DragonFly host.
+    `arm-buildworld` runs the same stages with the host tools and
+    `arm-world`: headers, `_startup_libs` (with `_startup_libsrt`),
+    `_prebuild_libs`, `_generic_libs`, then everything, one directory at a
+    time with `-j2`.
+  - `tools/arm-smoke/run-multiuser.sh WORK`, `multiuser.exp`, 25/25 steps:
+    - rc runs fsck and the mounts, generates host keys, and starts
+      syslogd, devd, sshd, sendmail (dma) and cron;
+    - getty logs root in on `ttyu0`;
+    - the databases: `id operator`, setgid `dma` owned `root:mail`;
+    - `devd` runs;
+    - `cxxtest.cc` passes dynamic and static;
+    - `ssh root@localhost` logs in over lo0 (no NIC until Phase 5).
+- **Host tools** (`bin/arm-hosttools`), all from the fork and built
+  against glibc:
+  - makefs (FFS only, its cd9660/msdos/hammer2 back ends dropped);
+  - `pwd_mkdb` and `cap_mkdb` with libc's db;
+  - zic, localedef, mkcsmapper, mkesdb.
+  - A shared shim (`bsdlib.h` + `hostlib.c`) supplies `fgetln`, `errc`,
+    `reallocf`, `strtonum`, `setmode` and the `sys/endian.h` names.
+  - Implicit declarations are now errors in host builds: one in makefs
+    (pwcache) and one in pwd_mkdb (`dbopen`, hidden behind
+    `__BSD_VISIBLE`) truncated pointers on LP64 and segfaulted.
+- **installworld** (`bin/arm-installworld ROOT`):
+  - distrib-dirs from `etc/mtree`;
+  - the `install` target of each top directory, in Makefile.inc1's order;
+  - `etc distribution`;
+  - `etc` runs without `-j`, because `etc/sendmail` installs the same
+    files twice and races.
+  - The build is unprivileged. `arm-world`'s install shim logs each
+    `-o/-g/-m` to `ROOT.metalog` (`ARM_DESTDIR=ROOT`).
+  - New `arm-world` shims: `mtree -deU` (directories only), `cpdup`, and
+    `uudecode` (python).
+  - zic gets `ZIC_UG_FLAGS=`, so it doesn't look up `wheel` on the host.
+- **Image** (`bin/arm-mkimg [-s SIZE] ROOT IMAGE`): writes an mtree spec
+  for `makefs -F`:
+  - Everything defaults to `root:wheel`, with the on-disk modes less
+    group/other write.
+  - Directories take the owners and modes from `BSD.*.dist`.
+  - Files take them from the metalog; names resolve against the image's
+    own `master.passwd` and `group`.
+- **libc++** (fork `679daf21f6` import, `89b76ae2ac` port):
+  - `devd` is the only C++ program in base. aarch64 has no gcc, so it has
+    no libstdc++ either.
+  - FreeBSD's vendored libcxxrt and libc++ 21.1.8 are imported into
+    `contrib/libcxxrt` and `contrib/libcxx`, with the 111 llvm-libc headers
+    that `charconv.cpp` needs (see `README.DRAGONFLY`).
+  - `lib/libcxxrt` and `lib/libc++` are built only for aarch64:
+    - `libc++.a` contains libcxxrt's objects;
+    - `libc++.so` is a `GROUP` linker script, as on FreeBSD;
+    - the headers go in `/usr/include/c++/v1`, where the patched clang
+      driver looks.
+  - DragonFly changes to contrib, marked "DragonFly customization":
+    - DragonFly takes FreeBSD's ctype, xlocale and stdlib paths, since its
+      libc has the same `_CTYPE_*`, `_DefaultRuneLocale` and xlocale.
+    - FreeBSD's `__LONG_LONG_SUPPORTED` guards would otherwise hide
+      `std::strtoll`, `llabs` and `wcstoll` on any OS but FreeBSD.
+    - Atomic waits use `umtx_sleep(2)`/`umtx_wakeup(2)` on a 32-bit
+      contention word (as Linux's futex does), rather than the generic
+      polling backoff.
+    - FreeBSD's clang-18 fallback for `is_nothrow_convertible` lacks two
+      includes.
+  - `__config_site` sets `_LIBCPP_HAS_THREAD_API_PTHREAD`, because libc++
+    doesn't detect DragonFly.
+  - The `c++` shim uses `-stdlib++-isystem <sysroot>/usr/include/c++/v1`.
+    `-nostdinc++` still overrides it, so libc++'s own build and the
+    unwinder are unaffected.
+- **Fork changes for installworld** (`f62cde7168`):
+  - `etc/etc.aarch64` (`ttys` with getty on `ttyu0`–`3`, `ifconsole`;
+    `disktab`).
+  - libnvmm, libvgl and syscons' fonts and keymaps are x86-only.
+  - `share/terminfo`: tic writes into the objdir, where install reads,
+    instead of the source tree.
+  - `rc.d/syscons` does nothing without `/dev/ttyv0`.
+- **x86 check** (2026-10-03, fork `89b76ae2ac`):
+  - The new `lib/` and `share/` entries are gated to one architecture.
+    `bmake -V SUBDIR` for x86_64 `lib/` is identical to `91f2c9cb09`.
+  - `share/terminfo` built and installed in h2dev with the guest's tic:
+    2780 compiled entries in the objdir, none in the source tree, and
+    all 2620 `TERMINFO_ENTRIES` installed.
+  - `rc.d/syscons` is unchanged where `/dev/ttyv0` exists. On a
+    serial-only console such as h2dev's, it is now silent rather than
+    failing.
+  - No kernel or libc changes.
 
 ### Phase 5 — FDT, newbus and generic devices (≈3–5 wk)
 
@@ -1586,8 +1681,11 @@ DragonFly hardware.
    The PL011 tty and Phase 4a (static `init` + interactive `sh`) are done
    (see Phase 4, Progress). Next:
    - Phase 4b is done, and so is the Phase 3 exit test under load (see
-     Progress 4b). Next: a multi-user boot (`/etc`, `pwd_mkdb`, rc,
-     sshd) to finish Phase 4; libc++ for `devd`; then Phase 5.
+     Progress 4b).
+   - Phase 4 is done (Progress 4c): buildworld from clean,
+     installworld into a UFS image, and a multi-user boot with sshd.
+     Next: Phase 5 (FDT, newbus, virtio-net on QEMU, so sshd can be
+     reached from outside).
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable

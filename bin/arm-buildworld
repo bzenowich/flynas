@@ -1,0 +1,94 @@
+#!/bin/sh
+# buildworld for aarch64 on the Linux host, in Makefile.inc1's stages:
+#
+#   bin/arm-buildworld [-c]        -c: start clean (removes tools/sysroot
+#                                  and tools/uobj first)
+#
+#   host tools     bin/arm-hosttools (bmake, yacc, makefs, zic, ...)
+#   headers        bin/arm-sysroot, then buildincludes/installincludes
+#   libraries      _startup_libs (csu, compiler-rt, libgcc_eh, libc,
+#                  libc_rtld), _prebuild_libs, _generic_libs (gnu/lib,
+#                  lib, usr.bin/flex/lib)
+#   everything     libexec bin games gnu sbin share usr.bin usr.sbin
+#
+# Each directory is "obj all install" with bin/arm-world, shared
+# (ARM_SHARED=1) and -j2, one directory at a time; the world is installed
+# into the sysroot as it goes, which is what later directories build
+# against.  Stops at the first failure.  Logs: tools/wlogs/<dir>.log, and
+# tools/wlogs/summary.  bin/arm-installworld then makes an image root.
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
+case "${1:-}" in
+-c) rm -rf "$REPO/tools/sysroot" "$REPO/tools/uobj" ;;
+'') ;;
+*) sed -n '2,20p' "$0" >&2; exit 2 ;;
+esac
+LOGS="$REPO/tools/wlogs"
+rm -rf "$LOGS"
+mkdir -p "$LOGS"
+SUM="$LOGS/summary"
+: > "$SUM"
+start=$(date +%s)
+
+stamp() { echo "$(date +%H:%M:%S) $*" | tee -a "$SUM"; }
+
+# build DIR [targets]: one bin/arm-world run, logged.
+build() {
+    d=$1; shift
+    log="$LOGS/$(echo "$d" | tr / _).log"
+    # share/ only installs files, and with -j2 its install targets race
+    # (realinstall and installfiles both install FILES).
+    j=-j2
+    case $d in share|share/*) j= ;; esac
+    if ARM_SHARED=1 "$REPO/bin/arm-world" "$d" ${*:-obj all install} $j > "$log" 2>&1; then
+        stamp "ok   $d $*"
+    else
+        stamp "FAIL $d $*, see $log"
+        exit 1
+    fi
+}
+
+# subdirs TOP: TOP's SUBDIR for aarch64 (SUBDIR_ORDERED first).
+subdirs() {
+    (cd "$SRC/$1" && "$REPO/tools/host/bin/bmake" -m "$SRC/share/mk" \
+        MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
+        -V SUBDIR 2>/dev/null)
+}
+
+# each TOP: every subdirectory of TOP in turn (or TOP itself if it has none).
+each() {
+    top=$1 list=$(subdirs "$1")
+    [ -n "$list" ] || { build "$top"; return; }
+    for s in $list; do
+        [ -d "$SRC/$top/$s" ] && build "$top/$s"
+    done
+}
+
+stamp "host tools"
+"$REPO/bin/arm-hosttools" > "$LOGS/hosttools.log" 2>&1 || { stamp "FAIL host tools"; exit 1; }
+stamp "headers"
+"$REPO/bin/arm-sysroot" > "$LOGS/sysroot.log" 2>&1 || { stamp "FAIL arm-sysroot"; exit 1; }
+# (Makefile.inc1 runs "includes" over the whole tree; only these have INCS.)
+for d in lib gnu/lib usr.bin/flex usr.bin/dfregress; do
+    build "$d" buildincludes installincludes
+done
+
+# Makefile.inc1: _startup_libs (with _startup_libsrt), _prebuild_libs.
+for d in lib/csu lib/libcompiler_rt lib/libgcc_eh lib/libc lib/libc_rtld \
+    lib/libbz2 lib/liblzma lib/libz lib/libzstd lib/libutil lib/libpcap \
+    lib/libcrypt lib/libncurses/libncurses lib/librecrypto lib/libressl \
+    lib/libldns lib/libsbuf lib/libm lib/libpam/libpam lib/libypclnt \
+    lib/libprop; do
+    build "$d"
+done
+# _generic_libs
+each gnu/lib
+each lib
+build usr.bin/flex/lib
+
+# everything
+for top in libexec bin games gnu sbin share usr.bin usr.sbin; do
+    each "$top"
+done
+stamp "world done in $(( ($(date +%s) - start) / 60 )) min"
