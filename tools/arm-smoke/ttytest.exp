@@ -1,0 +1,11 @@
+# vmexpect.py script for ttytest.c: "expect TEXT" waits for TEXT on the
+# console, "send STRING" types STRING (Python escapes).
+expect ttytest: line?
+send hellx\x7fo world\r
+expect o world
+expect ttytest: wrote fa0
+expect ttytest: raw?
+send abc
+expect ttytest: intr?
+send \x03
+expect ttytest: PASS
