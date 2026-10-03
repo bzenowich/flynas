@@ -51,10 +51,16 @@ rm -rf "$OBJ"; mkdir -p "$OBJ"
 # MACHINE*: the target, not the host.  CCVER names an external compiler
 # (bsd.cpu.custom.mk); it must not match clang* or kern.pre.mk adds
 # -no-integrated-as, and there is no GNU as for aarch64 here.
+# Each target is its own bmake run: with -j, "depend all" in one run races
+# the machine/ forwarding headers that depend generates.
 cd "$OBJ"
-exec bmake -m "$SRC/share/mk" \
+flags= tgts=
+for t in $targets; do case "$t" in -*|*=*) flags="$flags $t" ;; *) tgts="$tgts $t" ;; esac; done
+for t in ${tgts:-all}; do
+bmake -m "$SRC/share/mk" \
     MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
     CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
     CC=cc LD=ld NM=nm OBJCOPY=objcopy OBJDUMP=objdump SIZE=size \
     NO_MODULES=yes \
-    $targets
+    $flags $t
+done

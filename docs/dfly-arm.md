@@ -124,6 +124,41 @@ original copyright header plus an "Imported from FreeBSD <commit>" line.
 
 ## 3. Architecture decisions
 
+### 3.0 FreeBSD for hardware facts, DragonFly for design
+
+FreeBSD arm64 tells us how the hardware and the ISA behave: registers, MMU and
+TLB rules, GIC and timer programming, relocations, errata. It is not a template
+for how the kernel is organized. Wherever FreeBSD's structure conflicts with what
+makes DragonFly what it is, the arm64 code is written DragonFly's way, using
+`platform/pc64` as the model:
+
+- **SMP without contention.** Prefer per-cpu data and lockless fast paths.
+  Use LWKT tokens, spinlocks and critical sections, never FreeBSD's
+  mtx/sx/rw/epoch/turnstiles. Cross-cpu work goes through LWKT IPI
+  messages, not `smp_rendezvous`. A global lock on a hot path is a bug, even
+  when FreeBSD has one in the same place.
+- **DragonFly's VM, pmap and interrupt model** (`machintr_abi`, interrupt
+  threads, `pmap_inval`-style batched invalidation), not FreeBSD's pmap
+  internals.
+- **Keep the distinctive features possible:** HAMMER2 (busdma cache
+  maintenance correct under load), swapcache, the vkernel (a `platform/vkernel`
+  equivalent for arm64 later), devfs naming, dm, and the native AHCI/NVMe
+  drivers (§3.5, Phase 5).
+- **Userland:** vendored MI code (LLVM libunwind, compiler-rt) and ABI
+  headers are used as they are. DragonFly's libc, libthread_xu and rtld stay
+  DragonFly's, with only MD pieces added.
+
+**Audit list.** Places where the current code still follows FreeBSD's
+structure, to revisit:
+
+- **ASIDs** (`pmap.c` `pmap_asid_alloc`): one global `asid_spin` and a bitmap
+  scan. Lookups are lockless on the generation check, but allocation and
+  rollover are serialized. Candidate: per-cpu ASID caches refilled in
+  batches.
+- **Context switch:** on every switch to a kernel thread, TTBR0 is loaded with
+  the empty table and the `pm_active` bit is cleared. Measure this against a
+  lazy approach that is still safe with respect to freed tables.
+
 ### 3.1 Names and tree layout
 
 DragonFly splits machine-dependent code two ways:
@@ -969,13 +1004,95 @@ with `sshd`.
   `#ifdef`, the `reloc_plt` signature, the `rtld_lock.c` include) and
   `rtld_libc.c`. Run `bin/arm-x86build` with the next batch of MI
   changes.
+- **The rest of `lib/`** (2026-10-03): every `lib/` subdirectory builds and
+  installs shared. Fixes along the way:
+  - **Headers:** DragonFly's own `<stddef.h>`, `<float.h>` and friends must
+    win over clang's resource headers, the same way DragonFly's gcc (which
+    ships none) sees them. Sources rely on what they pull in, such as
+    `<sys/cdefs.h>`. The cross `cc` uses `-nobuiltininc -idirafter
+    <resource>/include`. `include/float.h` hard-coded x87's 80-bit long
+    double; it now has the binary128 values on aarch64, checked against the
+    compiler's predefines.
+  - **Lib-specific fixes:**
+    - librecrypto: `OPENSSL_NO_ASM` off x86_64.
+    - liblzma: `immintrin.h` only on x86.
+    - libevtr: an aarch64 `va_list` built over the saved argument block.
+    - libkvm: `kvm_aarch64.c`, no crash dumps yet; `kvm_proc.c` includes
+      `<machine/pmap.h>`.
+    - libefivar: `MDE_CPU_AARCH64`, and `machine/efi.h` from FreeBSD's
+      arm64 (an ABI header).
+    - ncurses: on a Linux host, the host-built tic uses ncurses' own getcap,
+      since glibc has no `cgetent`.
+  - **`arm-world`:**
+    - creates the sysroot tree from `etc/mtree`;
+    - passes `_SHLIBDIRPREFIX`, and its link rewrite handles links that
+      already name the sysroot;
+    - adds shims for `c++` and `rpcgen`;
+    - adds a `tools/host/hinc` for host programs (`xlocale.h`,
+      `__DECONST`).
+  - **`arm-kbuild`** runs one bmake per target, because `-j2 depend all`
+    raced the `machine/` forwarding headers.
+- **Unwinder:**
+  - `contrib/libunwind` is LLVM libunwind from FreeBSD's vendor tree, used
+    unmodified. `lib/libgcc_eh` builds it, plus compiler-rt's
+    `gcc_personality_v0`.
+  - `libgcc_pic.a` is now the linker script `INPUT(-lgcc -lgcc_eh)`, so
+    shared links get the unwinder as well.
+  - `tools/arm-smoke/ehtest.c` tests `_Unwind_Backtrace`,
+    `_Unwind_ForcedUnwind` with cleanups, and unwinding through libc's
+    `qsort`. It passes static and dynamic in `run-dyn.sh`, now 27 steps.
+- **SMP memory ordering (§3.7 follow-through):**
+  - Under QEMU, dltest hung about once in a hundred runs. Three fixes:
+  - **Atomics were not full barriers.** A SEQ_CST `LDAXR`/`STLXR` is not
+    a full barrier, so a later plain load could pass it. That broke the
+    IPI handshake: the receiver clears `gd_npoll` and then reads
+    `ip_windex`, which can lose an IPI. Every `atomic.h` read-modify-write
+    now ends in `dmb ish`, the x86 `lock` semantics that MI code assumes.
+  - **IPI FIFO release.** A compiler fence before `ip_rindex`/`ip_xindex`
+    let the slot be reused before it was read. `lwkt_ipiq.c` now uses
+    `atomic_thread_fence_rel()`, new in both `atomic.h`s: a compiler
+    fence on x86 (unchanged code there) and `dmb ish` on aarch64.
+    `atomic_store_rel_int` would have been wrong for this hot path,
+    because it is a locked `xchg` on x86.
+  - **cpusync.** The stage-2 release and the acks got
+    `atomic_thread_fence_rel/acq()`. `cpu_lfence` is a real `lfence` on
+    x86, which isn't wanted there.
+  - Rule for MI ordering fixes: they must cost x86 nothing beyond
+    compiler fences. DragonFly's IPI and token paths are built to have
+    no contention, and arm64 bring-up must not tax x86 to get there.
+  - Afterwards, 300 runs of dltest in a row had no hang.
+  - **Stale per-cpu pointer in `doreti`.** Two dltest loops in parallel
+    once froze the guest: no output for 40 minutes, not even from the
+    loops' 30 s hang watchdogs. Other runs panicked with "lwkt_switch: Attempt to switch from a
+    fast interrupt" from the idle thread.
+    - The cause: `doreti` cached `gd = mdcpu` and then called `ast()`,
+      which can resume the thread on the other cpu.
+    - The loop then ran on that cpu's globaldata. It made non-atomic
+      `gd_intr_nesting_level` updates that raced with it, and it cleared
+      its deferred `RQF_TIMER`. The one-shot timer stays disarmed when
+      the tick is lost.
+    - The fix re-reads `gd` on every loop iteration. x86 does that for
+      free, because `PCPU()` is `%gs`-relative.
+    - Any C trap-return code that holds a `gd` across a possible switch
+      has the same hazard.
+  - The stress test is `EXP=stress.exp WAIT=1500 tools/arm-smoke/run-dyn.sh
+    WORK -t 1600`: two loops of 200 dltests each, in parallel, with a
+    30 s hang watchdog per run. It takes about 8 minutes under TCG and
+    now passes repeatedly.
+- **Panic backtraces without ddb:**
+  - `platform/arm64/aarch64/backtrace.c` walks the frame-pointer chain
+    and steps through exception trapframes.
+  - Boot tunable `debug.panic_test=1|2` tests it.
+  - `tools/arm-smoke/ksym.sh LOG` symbolizes the output.
 - **Still open for 4b:**
-  - Hook csu and libcompiler_rt into buildworld.
-  - A real unwinder for `libgcc_eh`.
+  - Hook csu, libcompiler_rt and libgcc_eh into buildworld.
   - NLS.
   - The Clang target patch.
-  - The rest of world (more libraries shared, then `bin`, `sbin`, `usr.*`),
-    then the Phase 3 exit test under load.
+  - Rebuild all of `lib/` once with the final headers. Libraries built
+    before the include-order and atomics changes are stale.
+  - The rest of world (`bin`, `sbin`, `usr.*`), then the Phase 3 exit test
+    under load.
+  - An x86 check of the MI changes: `bin/arm-x86build`.
 
 ### Phase 5 — FDT, newbus and generic devices (≈3–5 wk)
 

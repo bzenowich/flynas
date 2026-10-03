@@ -1,0 +1,13 @@
+# vmexpect.py script for run-dyn.sh EXP=stress.exp: two dltest loops in
+# parallel, 200 runs each.  A run still alive after 30 s counts as hung.
+# Each loop ends "LOOPEND <name> 200 hung 0" on success; a hang or a
+# panic leaves the expect to time out.  The markers are split in the
+# command so the echoed command line cannot match.
+expect Enter full pathname of shell or RETURN for /bin/sh:
+send \r
+expect #
+send L() { i=0; h=0; while [ $i -lt $2 ]; do /bin/dltest > /dev/null & p=$!; n=0; while kill -0 $p 2>/dev/null && [ $n -lt 30 ]; do /bin/sleep 1; n=$((n+1)); done; if [ $n -ge 30 ]; then echo "HU""NG $1 it $i"; h=$((h+1)); kill -9 $p; fi; wait $p; i=$((i+1)); done; echo "LOOP""END $1 $i hung $h"; }\r
+expect #
+send L a 200 & L b 200; wait\r
+expect 200 hung 0
+expect 200 hung 0

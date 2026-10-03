@@ -19,3 +19,11 @@ send LD_BIND_NOW=1 /bin/libmtest; echo "libmtest rc=$?"\r
 expect libmtest: PASS
 expect rc=0
 expect # 
+send /bin/ehtest; echo "ehtest rc=$?"\r
+expect ehtest: PASS
+expect rc=0
+expect #
+send /bin/ehtest.static; echo "ehtest static rc=$?"\r
+expect ehtest: PASS
+expect rc=0
+expect #

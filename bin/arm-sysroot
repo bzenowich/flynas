@@ -55,6 +55,8 @@ def put(src, dst):
         os.unlink(dst)
     if os.path.exists(dst) and filecmp.cmp(src, dst, shallow=False):
         return
+    if os.path.exists(dst):
+        os.unlink(dst)      # "make install" leaves headers read-only (444)
     shutil.copyfile(src, dst)
     os.chmod(dst, 0o644)
     copied += 1

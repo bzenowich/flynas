@@ -25,10 +25,19 @@ dir="$1"; shift
 targets="${*:-obj all install}"
 [ -x "$HOSTBIN/bmake" ] || "$REPO/bin/arm-hosttools"
 [ -d "$SYSROOT/usr/include/sys" ] || "$REPO/bin/arm-sysroot" "$SYSROOT"
-mkdir -p "$SYSROOT/usr/lib" "$SYSROOT/usr/bin" "$SYSROOT/bin" "$SYSROOT/sbin" \
-    "$SYSROOT/usr/sbin" "$SYSROOT/usr/libexec" "$SYSROOT/usr/share/man" \
-    "$SYSROOT/lib" "$SYSROOT/libexec"
-# The clang driver links -lgcc_eh; there is no unwinder yet, so an empty one.
+# The directory tree, as installworld's mtree pass makes it.
+mtree_dirs() {
+    awk -v top="$2" '/^#|^\/|^[ \t]*$/ { next }
+        $1 == "." { n = 0; next }
+        $1 == ".." { n--; next }
+        { d[++n] = $1; p = top; for (i = 1; i <= n; i++) p = p "/" d[i]; print p }' "$1"
+}
+[ -d "$SYSROOT/usr/lib/priv" ] || {
+    mtree_dirs "$SRC/etc/mtree/BSD.root.dist" ""
+    mtree_dirs "$SRC/etc/mtree/BSD.usr.dist" /usr
+    mtree_dirs "$SRC/etc/mtree/BSD.include.dist" /usr/include
+} | sed "s|^|$SYSROOT|" | xargs mkdir -p
+# The clang driver links -lgcc_eh: an empty one until lib/libgcc_eh is built.
 [ -f "$SYSROOT/usr/lib/libgcc_eh.a" ] || llvm-ar-18 rc "$SYSROOT/usr/lib/libgcc_eh.a"
 
 # Binutils names map to LLVM.  Static by default (NOPIC, NOSHARED), and no
@@ -39,16 +48,22 @@ mkdir -p "$UB"
 # predefines are supplied here; the driver's dragonfly toolchain still picks
 # crt*.o, -lc and -lgcc from the sysroot.  The symbol maps name symbols
 # some builds lack, which GNU ld accepts: --undefined-version does the same
-# for lld.
+# for lld.  DragonFly's own <stddef.h> and friends come first (its gcc has
+# no copies of them, and sources rely on what they pull in, such as
+# <sys/cdefs.h>); clang's resource headers only fill the gaps (arm_neon.h).
+RES="$(clang-18 -print-resource-dir)/include"
 cat > "$UB/cc" <<EOI
 #!/bin/sh
 case " \$* " in *" -c "*|*" -E "*|*" -S "*|*" -M "*) LD= ;; *) LD="-fuse-ld=$LLD -Wl,--undefined-version" ;; esac
 exec clang-18 --target=aarch64-unknown-dragonfly --sysroot=\${SYSROOT:-$SYSROOT} \\
-    \$LD \\
+    \$LD -nobuiltininc -idirafter $RES \\
     -D__DragonFly__=1 -D__DragonFly_cc_version=100001 -D__unix__=1 -D__unix=1 \\
     -D__KPRINTF_ATTRIBUTE__=1 "\$@"
 EOI
 chmod +x "$UB/cc"
+# C++ (the unwinder's sources): no C++ library yet, so -nostdinc++.
+sed -e 's/exec clang-18 /exec clang++-18 -nostdinc++ /' "$UB/cc" > "$UB/c++"
+chmod +x "$UB/c++"
 ln -sf "$LLD" "$UB/ld"
 for t in nm objcopy objdump size readelf ar ranlib strip strings; do
     ln -sf "$(command -v llvm-$t-18)" "$UB/$t"
@@ -88,12 +103,40 @@ case "$1" in -*h*) f=$(echo "$1" | tr h n); shift; set -- "$f" "$@" ;; esac
 exec /usr/bin/ln "$@"
 EOI
 chmod +x "$UB/ln"
+# rpcgen: the host's (glibc) one names the input's full path in the
+# generated #include "x.h"; BSD's uses the basename.  Run it on a link.
+cat > "$UB/rpcgen" <<'EOI'
+#!/bin/sh
+n=$#; i=0
+for a; do
+    i=$((i + 1))
+    if [ $i -eq $n ] && [ "${a%.x}" != "$a" ] && [ "${a#*/}" != "$a" ]; then
+        ln -sfn "$a" "${a##*/}"; a="${a##*/}"
+    fi
+    set -- "$@" "$a"
+done
+shift $n
+exec /usr/bin/rpcgen "$@"
+EOI
+chmod +x "$UB/rpcgen"
 # lorder | tsort orders archive members for one-pass linkers; ld.lld does not
 # care, so keep the given order.  tsort prints each node once, and libc's
 # list names the syscall stubs twice: drop repeats.
 printf '#!/bin/sh\nfor f; do echo "$f"; done\n' > "$UB/lorder"
 printf '#!/bin/sh\nexec awk '"'"'!seen[$0]++'"'"'\n' > "$UB/tsort"
 chmod +x "$UB/lorder" "$UB/tsort"
+
+# Host programs (bsd.hostprog.mk, built with the host's cc) see headers a
+# BSD host has and glibc lacks; -idirafter keeps the real ones first.
+HINC="$REPO/tools/host/hinc"
+mkdir -p "$HINC"
+printf '#include <locale.h>\n' > "$HINC/xlocale.h"
+# ...and <sys/cdefs.h> macros that glibc's lacks, pre-included.
+cat > "$HINC/bsdhost.h" <<'EOI'
+#ifndef __DECONST
+#define	__DECONST(type, var)	((type)(unsigned long)(const void *)(var))
+#endif
+EOI
 
 export PATH="$UB:$HOSTBIN:$PATH"
 export MAKEOBJDIRPREFIX="$REPO/tools/uobj"
@@ -112,15 +155,17 @@ for t in $tgts; do
 bmake -m "$SRC/share/mk" \
     MACHINE=arm64 MACHINE_ARCH=aarch64 MACHINE_PLATFORM=arm64 \
     CCVER=llvm18 HOST_CCVER=llvm18 HOST_BINUTILSVER=none \
-    CC=cc CPP="cc -E" CXX=false LD=ld AR=ar RANLIB=ranlib NM=nm \
+    CC=cc CPP="cc -E" CXX=c++ LD=ld AR=ar RANLIB=ranlib NM=nm \
     OBJCOPY=objcopy OBJDUMP=objdump SIZE=size STRIP=-s INSTALL=install \
-    DESTDIR="$SYSROOT" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes NO_NLS=yes \
-    BINOWN=$(id -un) BINGRP=$(id -gn) \
+    DESTDIR="$SYSROOT" _SHLIBDIRPREFIX="$SYSROOT" NOMAN=yes NOPROFILE=yes $static NO_WERROR=yes NO_NLS=yes \
+    BINOWN=$(id -un) BINGRP=$(id -gn) "CROSS_CFLAGS=-idirafter $HINC -include $HINC/bsdhost.h" \
     $flags $t
 done
 # Installed symlinks are absolute (/lib/libc.so.8), which on the host points
 # outside the sysroot: make them relative to it.
+# Links made with _SHLIBDIRPREFIX already name the sysroot.
 find "$SYSROOT" -type l -lname '/*' | while read -r l; do
     t=$(readlink "$l")
-    ln -sfn "$(realpath -m --relative-to="$(dirname "$l")" "$SYSROOT$t")" "$l"
+    case "$t" in "$SYSROOT"/*) ;; *) t="$SYSROOT$t" ;; esac
+    ln -sfn "$(realpath -m --relative-to="$(dirname "$l")" "$t")" "$l"
 done
