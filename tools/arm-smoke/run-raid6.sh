@@ -13,7 +13,9 @@
 # (e.g. to run one group under sh -x); KERNEL= boots another kernel.bin;
 # WAIT= sets the expect
 # timeout per step (default 6 h, since run_all.sh prints each group only
-# when it ends).
+# when it ends).  ROOTSIZE= sizes the root image (default 600m; group N
+# keeps a 512 MB file in /var/tmp, so give it 1200m).  R6BUS=mmio: see
+# below.
 D=$(cd "$(dirname "$0")/../.." && pwd)
 T="$D/tools/arm-smoke"
 reuse=0
@@ -43,15 +45,31 @@ cat > "$R/etc/rc.conf" <<EOI
 hostname="arm64-virt"
 EOI
 sed "s/@GROUPS@/${R6GROUPS:-}/" "${EXP:-$T/raid6.exp}" > "$W/raid6.exp"
-"$D/bin/arm-mkimg" -s 600m "$R" "$W/root.img"
-args="-drive if=none,file=$W/root.img,format=raw,id=d0
-    -device virtio-blk-pci,drive=d0"
+"$D/bin/arm-mkimg" -s "${ROOTSIZE:-600m}" "$R" "$W/root.img"
+# R6BUS=mmio puts the disks on virtio-mmio instead of virtio-pci (PCI
+# INTx is not delivered with more than one cpu yet).  QEMU fills mmio
+# slots top-down and they attach bottom-up, so the last -device is vbd0:
+# list them in reverse.
+args=
 for i in 1 2 3 4; do
     rm -f "$W/r$i.img"
     truncate -s 4g "$W/r$i.img"
-    args="$args -drive if=none,file=$W/r$i.img,format=raw,id=d$i
-    -device virtio-blk-pci,drive=d$i"
 done
+if [ "${R6BUS:-pci}" = mmio ]; then
+    for i in 4 3 2 1; do
+        args="$args -drive if=none,file=$W/r$i.img,format=raw,id=d$i
+    -device virtio-blk-device,drive=d$i"
+    done
+    args="$args -drive if=none,file=$W/root.img,format=raw,id=d0
+    -device virtio-blk-device,drive=d0"
+else
+    args="-drive if=none,file=$W/root.img,format=raw,id=d0
+    -device virtio-blk-pci,drive=d0"
+    for i in 1 2 3 4; do
+        args="$args -drive if=none,file=$W/r$i.img,format=raw,id=d$i
+    -device virtio-blk-pci,drive=d$i"
+    done
+fi
 
 rc=0
 ARM_VM_ARGS="-nic none $args" \
