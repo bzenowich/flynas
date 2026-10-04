@@ -18,9 +18,10 @@ sshd. libc++ and libcxxrt (from FreeBSD) give aarch64 its C++ runtime
 (see Progress 4c). **Phase 5 has started:** newbus is built from the
 DTB, and the installed world boots from a virtio-mmio disk with a
 virtio-mmio NIC (see Progress 5a). PCIe ECAM, busdma with cache
-maintenance, AHCI and xhci + usb-storage work too (Progress 5b–5d). Left
-in Phase 5: the RAID6 suite on 4 disks, which needs the RAID6 overlay
-forward-ported to master.
+maintenance, AHCI and xhci + usb-storage work too (Progress 5b–5d).
+**Phase 5's exit test passed** (2026-10-03): the hammer2 RAID6 suite,
+forward-ported to master, runs 65/65 on 4 virtio disks (Progress 5e).
+Left before Phase 6: the x86 check of the MI changes.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -423,11 +424,10 @@ Calibrate after Phase 2.
   - No GitHub fork or `origin` remote yet. Add one when there is something
     to publish.
   - To sync: `git fetch upstream && git rebase upstream/master` on `arm64`.
-  - **The base is master, not v6.4.2.** The hammer2 RAID6 patch
-    (`hammer2-raid6/hammer2_raid6.patch`) applies to v6.4.2 (21/21 file
-    blobs match) but not master (3/21). hammer2 has moved on, so the patch
-    needs forward-porting to master before Phase 5's RAID6 test. Do that on
-    x86_64 in h2dev first.
+  - **The base is master, not v6.4.2.** The hammer2 RAID6 overlay was
+    written against v6.4.2; it was forward-ported to master on
+    2026-10-03 (hammer2-raid6 `7e24841`, patch `e3f3c9a`; see Progress
+    5e).
 - **Done 2026-10-01: the rest of Phase 0.** There are five commits on
   `arm64`:
 
@@ -1430,14 +1430,39 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
 - **x86 check pending:** the MI changes (`DRIVER_MODULE` virtio_mmio,
   `pci_pci.c`, `pci.c`, `virtio_pci.c`, ahci, xhci, `vm_page.c`) need a
   build and boot on h2dev with `bin/arm-x86build`.
-- **Left for the Phase 5 exit test: the RAID6 suite on 4 disks.** The
-  overlay in `hammer2-raid6/src` is based on v6.4.2, and the fork is
-  master, with about 10k lines changed in hammer2 since then. A trial
-  three-way merge conflicts in `hammer2_io.c` (4 hunks),
-  `newfs_hammer2.c` (3), `hammer2_flush.c` (1) and `hammer2_ioctl.c` (1).
-  The rest merges cleanly. The plan is to forward-port on x86 in h2dev
-  first.
 - Later: MSI through GICv2m.
+
+**Progress 5e (2026-10-03): Phase 5 exit test passed.**
+- **RAID6 overlay on master.** `hammer2-raid6/src` moved from v6.4.2 to
+  master (hammer2-raid6 `7e24841`). The three-way merge conflicted in
+  `hammer2_io.c` (master replaced the dio RB tree with a spinlocked hash;
+  the RAID6 path now uses it), `newfs_hammer2.c`, `hammer2_flush.c` and
+  `hammer2_ioctl.c`. `hammer2-raid6/bin/apply-overlay SRCDIR` installs the
+  overlay into a master tree; `hammer2_raid6.patch` (`e3f3c9a`) is the
+  same thing as a patch against `arm64-base`. It no longer applies to
+  6.4.2, so h2dev's `deploy.sh`/`install_raid6.sh` flow needs that guest
+  on master. Done on arm64 directly, not on x86 first as planned: the
+  overlay has not been built on x86 against master yet.
+- **Upstream kdmsg race fixed** (fork `52d1c56856`, `kern_dmsg.c`).
+  Plain single-disk hammer2 hung on master under TCG, with or without the
+  overlay: the `hammer2 service` daemon's startup scan sent RECLUSTER for
+  the new mount before it `accept()`ed mount_hammer2's connection, and the
+  reconnect waited for the old reader thread while holding the root vnode
+  lock; that reader was blocked on a socket nobody would accept or close.
+  The reconnect now shuts down the old descriptor itself. Fast x86 wins
+  the race, which is why it doesn't show there. Found with a temporary
+  lockmgr timeout that printed the holder's acquire-site PCs and
+  `td_wmesg`.
+- **Test:** `tools/arm-smoke/run-raid6.sh [-n] WORK` with `raid6.exp`.
+  It needs a fork worktree with the overlay applied (`R6SRC`), its
+  kernel built as `ARM64_R6`, and `sbin/newfs_hammer2` + `sbin/hammer2`
+  built with `DFLY_SRC=R6SRC bin/arm-world DIR obj all -j2`. Boots the
+  installed world plus 4 × 4 GB virtio-blk-pci disks and runs
+  `tests/v3/run_all.sh`. `R6GROUPS=` picks groups (not `GROUPS`, a bash
+  builtin). Result: **65 pass, 0 fail**, groups A–L (incl. resilver, EIO
+  injection, scrub, read-path self-heal), no panics.
+- **x86 check pending** now also covers `kern_dmsg.c` and the overlay
+  built against master.
 
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
@@ -1808,8 +1833,10 @@ DragonFly hardware.
    - Phase 4 is done (Progress 4c): buildworld from clean,
      installworld into a UFS image, and a multi-user boot with sshd.
    - Phase 5a is done (Progress 5a): FDT newbus, virtio-mmio disk and
-     NIC. 5b–5d are done too (ECAM, busdma, AHCI, xhci + umass). Next:
-     forward-port the RAID6 overlay to master and run its suite.
+     NIC. 5b–5d are done too (ECAM, busdma, AHCI, xhci + umass), and
+     the Phase 5 exit test passed (Progress 5e: RAID6 suite 65/65 on
+     master). Next: the x86 check of all MI changes in h2dev
+     (`bin/arm-x86build`), then Phase 6 (Pi 4 bring-up).
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
