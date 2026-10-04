@@ -1,0 +1,26 @@
+# vmexpect.py script for run-storage.sh: root on virtio-blk-pci, one disk
+# on AHCI and one usb-storage disk on qemu-xhci (both CAM da), booted with
+# hw.busdma.debug=3 (sync audit + PREREAD poisoning).  Each da disk (AHCI
+# da0; umass disks are numbered from da8) gets 32 MB written and read
+# back; the busdma audit must stay at 0.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send ls /dev/da0 /dev/da8 | wc -l | sed 's/^ */D''EVS /'\r
+expect DEVS 2
+send dd if=/dev/random of=/tmp/p bs=1m count=32 2>/dev/null; echo "RAN""DOM ok"\r
+expect RANDOM ok
+send dd if=/tmp/p of=/dev/da0 bs=64k 2>/dev/null; dd if=/dev/da0 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A0 ok"\r
+expect DA0 ok
+send dd if=/tmp/p of=/dev/da8 bs=64k 2>/dev/null; dd if=/dev/da8 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A8 ok"\r
+expect DA8 ok
+send sysctl -n hw.busdma.audit_reports | sed 's/^/AUD''IT /'\r
+expect AUDIT 0
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

@@ -17,7 +17,10 @@ a UFS image, and boots on QEMU to multi-user with rc, getty, devd and
 sshd. libc++ and libcxxrt (from FreeBSD) give aarch64 its C++ runtime
 (see Progress 4c). **Phase 5 has started:** newbus is built from the
 DTB, and the installed world boots from a virtio-mmio disk with a
-virtio-mmio NIC (see Progress 5a). Next: PCIe ECAM (5b).
+virtio-mmio NIC (see Progress 5a). PCIe ECAM, busdma with cache
+maintenance, AHCI and xhci + usb-storage work too (Progress 5b–5d). Left
+in Phase 5: the RAID6 suite on 4 disks, which needs the RAID6 overlay
+forward-ported to master.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1368,21 +1371,73 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   - `support.c` gains `_bcopy` and friends (bpf).
   - `ARM64_VIRT` gets `bpf`, `virtio`, `virtio_mmio`, `virtio_blk` and
     `vtnet`.
-- **Known: the contigmalloc DMA reserve is empty on `virt`.**
-  - `vm_page_startup` reserves physical pages below 256 MB (absolute PFNs
-    0–65535), and `virt`'s RAM starts at 1 GB.
-  - So every `contigmalloc` falls back to the general scan, which works.
-    Under `-v` each fallback prints a `nospace` backtrace.
-  - The Pi 4 has RAM at 0, and its DMA engines want low memory, so fix
-    this with busdma (5c): base the reserve on `phys_avail[0]`.
-- **x86 check pending:** the only MI change so far is the two
-  `DRIVER_MODULE` lines. It goes to h2dev together with 5b's `bus/pci`
-  work.
-- Next:
-  - 5b: `pci_host_generic` (ECAM), with INTx through `interrupt-map` and
-    MSI through GICv2m, for virtio-pci, AHCI and xhci.
-  - 5c: busdma with cache maintenance.
-  - 5d: AHCI, xhci + umass, then the RAID6 suite on 4 disks.
+- **Fixed in 5c: the contigmalloc DMA reserve was empty on `virt`.**
+  `vm_page_startup` reserved absolute PFNs 0–65535, and `virt`'s RAM
+  starts at 1 GB, so every `contigmalloc` took the general scan.
+
+#### Progress 5b–5d: ECAM, busdma, AHCI, xhci + umass (2026-10-03)
+
+- **5b, PCIe ECAM** (fork `e6c8a569a1`):
+  - `pci_host_generic{,_fdt}.c` and `ofw_pci.h` from FreeBSD. The bridge
+    keeps I/O, memory and prefetch rmans in PCI address space and maps
+    child BARs itself through the FDT `ranges`. I/O space is
+    memory-mapped, so I/O-port resources carry the memory bus tag.
+  - INTx through the node's `interrupt-map`. MSI returns `ENXIO` until
+    GICv2m is wired up; drivers fall back to INTx.
+  - `run-virtio.sh -p` runs the virtio test on virtio-blk-pci and
+    virtio-net-pci: 17/17, and mmio still passes 17/17.
+- **vm: the contig reserve is based on the start of RAM** (fork
+  `e4dd3af165`, MI). The alist is indexed from `vm_contig_base`, the
+  first RAM page rounded down to the alist's 65536-page span (0 on PCs).
+  On `virt`: "DMA space used: 9572k, remaining available: 130112k".
+- **5c, busdma** (fork `b5e31e1c51`), `aarch64/busdma_machdep.c` from the
+  x86_64 one:
+  - Maps are never NULL, because the MI `bus_dmamap_sync()` macro skips
+    NULL maps.
+  - A load records its physical chunks, bounce pages included. Sync
+    cleans and invalidates them to PoC through the DMAP. The partial
+    lines at the ends of a POSTREAD are cleaned, not dropped.
+  - `bus_dmamem_alloc()` memory is contiguous and Normal non-cacheable
+    (KVA and DMAP alias), so rings that drivers never sync work.
+  - `hw.busdma.coherent=1` turns cache maintenance off.
+  - `hw.busdma.debug` catches missing syncs on QEMU, which models no
+    caches. Bit 0 audits each load's PRE/POST sequence
+    (`hw.busdma.audit_reports`). Bit 1 poisons the buffer at PREREAD.
+    Both accept USB's `usb_pc_cpu_invalidate` idiom, a POSTREAD and
+    then a PREREAD after which the CPU reads the buffer.
+  - Not yet: bouncing buffers that share cache lines with other data,
+    and `dma-ranges` offsets. Both matter on the Pi 4.
+- **5d, AHCI and xhci + umass** (fork `590d70f716`). Nothing sets up PCI
+  on `virt`: BARs are unassigned and bus mastering is off. MI fixes, none
+  of which changes PCs:
+  - ahci enables bus mastering, as FreeBSD's does.
+  - `pci.c` skips USB early takeover when the controller's BAR has no
+    resource list entry. The takeover's lazy BAR allocation left a stale
+    range, and xhci's own attach failed with "Could not map memory".
+  - xhci no longer steps the control status stage (FreeBSD's
+    `XHCI_STEP_STATUS_STAGE`). QEMU fetches a control transfer as one
+    chain and never starts one whose status TRB is held back, so no
+    device enumerated.
+  - virtio_pci falls back to the legacy interrupt when MSI-X allocation
+    fails, instead of panicking.
+  - `ARM64_VIRT` gets `ahci`, `scbus`, `da`, `pass`, `usb`, `xhci` and
+    `umass`.
+  - `tools/arm-smoke/run-storage.sh WORK`, `storage.exp`, 19/19: root on
+    virtio-blk-pci, an AHCI disk (`da0`) and a usb-storage disk on
+    qemu-xhci (`da8`; umass disks are numbered from da8). Booted with
+    `hw.busdma.debug=3`, each disk gets 32 MB written and read back, and
+    the audit stays at 0.
+- **x86 check pending:** the MI changes (`DRIVER_MODULE` virtio_mmio,
+  `pci_pci.c`, `pci.c`, `virtio_pci.c`, ahci, xhci, `vm_page.c`) need a
+  build and boot on h2dev with `bin/arm-x86build`.
+- **Left for the Phase 5 exit test: the RAID6 suite on 4 disks.** The
+  overlay in `hammer2-raid6/src` is based on v6.4.2, and the fork is
+  master, with about 10k lines changed in hammer2 since then. A trial
+  three-way merge conflicts in `hammer2_io.c` (4 hunks),
+  `newfs_hammer2.c` (3), `hammer2_flush.c` (1) and `hammer2_ioctl.c` (1).
+  The rest merges cleanly. The plan is to forward-port on x86 in h2dev
+  first.
+- Later: MSI through GICv2m.
 
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
@@ -1753,7 +1808,8 @@ DragonFly hardware.
    - Phase 4 is done (Progress 4c): buildworld from clean,
      installworld into a UFS image, and a multi-user boot with sshd.
    - Phase 5a is done (Progress 5a): FDT newbus, virtio-mmio disk and
-     NIC. Next: 5b, PCIe ECAM.
+     NIC. 5b–5d are done too (ECAM, busdma, AHCI, xhci + umass). Next:
+     forward-port the RAID6 overlay to master and run its suite.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
