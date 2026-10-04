@@ -1440,9 +1440,17 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   `hammer2_ioctl.c`. `hammer2-raid6/bin/apply-overlay SRCDIR` installs the
   overlay into a master tree; `hammer2_raid6.patch` (`e3f3c9a`) is the
   same thing as a patch against `arm64-base`. It no longer applies to
-  6.4.2, so h2dev's `deploy.sh`/`install_raid6.sh` flow needs that guest
-  on master. Done on arm64 directly, not on x86 first as planned: the
-  overlay has not been built on x86 against master yet.
+  6.4.2. Done on arm64 directly, not on x86 first as planned.
+- **h2dev moved to master (2026-10-04).** The x86 guest now runs
+  `48147b0412` + overlay, world and kernel built in the guest from
+  `/usr/src` (branch `master-h2`) with `KERNCONF=H2DEV` (X86_64_GENERIC
+  minus `options HAMMER2`, keeps hammer2 a module); 6.4.2 kernel kept as
+  `/boot/kernel.old`, VM snapshots `pre-master` / `master-base`.
+  buildworld 45 min + buildkernel 45 min at -j2. `NO_ALTCOMPILER=yes`
+  must go to installworld/upgrade as well as buildworld. `deploy.sh`
+  now syncs via `apply-overlay` (hammer2-raid6 `df83818`). Full v3 suite
+  on x86: 64/1, the one failure a dmesg(8) ENOMEM race in the test (fixed
+  with a retrying `kmsg` helper, `7f79a22`; E+L then 11/11).
 - **Upstream kdmsg race fixed** (fork `52d1c56856`, `kern_dmsg.c`).
   Plain single-disk hammer2 hung on master under TCG, with or without the
   overlay: the `hammer2 service` daemon's startup scan sent RECLUSTER for
