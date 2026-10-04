@@ -31,6 +31,10 @@ U="$D/tools/uobj$SRC/sbin"
 [ $reuse = 1 ] && [ -d "$R/etc" ] || "$D/bin/arm-installworld" "$R"
 
 install -m 555 "$U/newfs_hammer2/newfs_hammer2" "$U/hammer2/hammer2" "$R/sbin/"
+# group F's parity check (standalone C, no DragonFly headers)
+mkdir -p "$R/usr/local/bin"
+"$D/tools/host/ubin/cc" -O2 -o "$R/usr/local/bin/h2stripe_check" \
+    "$H2R6/src/diag/h2stripe_check.c"
 rm -rf "$R/root/hammer2-tests"
 mkdir -p "$R/root/hammer2-tests"
 cp -R "$H2R6/tests/v3" "$R/root/hammer2-tests/"
