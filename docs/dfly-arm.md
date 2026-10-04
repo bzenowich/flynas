@@ -1451,6 +1451,19 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   now syncs via `apply-overlay` (hammer2-raid6 `df83818`). Full v3 suite
   on x86: 64/1, the one failure a dmesg(8) ENOMEM race in the test (fixed
   with a retrying `kmsg` helper, `7f79a22`; E+L then 11/11).
+- **x86 check of the fork passed (2026-10-04).** `bin/arm-x86build build`
+  of fork `52d1c56856` (all MI changes since `1496798ba5` plus the
+  `kern_dmsg.c` fix) on the master guest: clean, 17 min at -j2;
+  `boottest` booted it with no panic/lock-order/witness lines and
+  returned to the stock kernel. On that kernel, 5 cycles of
+  mount/write/umount/remount/verify of one newfs'd single-disk hammer2
+  with `hammer2 service` running all passed (the kdmsg race path).
+  Installed kernels are now stripped (`strip --strip-debug`) to fit
+  `/boot`; the debug copies stay in the obj trees.
+- Upstream master side finding: `timeout(1)` fails at start on both the
+  stock master kernel and the fork kernel with `sigaction(32): Invalid
+  argument` (it catches every signal below `sys_nsig`, SIGTHR included),
+  after it has already forked the child. Not investigated further.
 - **Upstream kdmsg race fixed** (fork `52d1c56856`, `kern_dmsg.c`).
   Plain single-disk hammer2 hung on master under TCG, with or without the
   overlay: the `hammer2 service` daemon's startup scan sent RECLUSTER for
