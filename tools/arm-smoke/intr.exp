@@ -1,0 +1,24 @@
+# vmexpect.py script for run-storage.sh EXP=intr.exp (review-10-05
+# S1/P3): with -s 4, device interrupts must be spread over the cpus
+# (gic.c routes SPI irq n to cpu n % ncpus).  Moves data through the
+# AHCI and usb-storage disks, then prints vmstat -iv, whose "irqN  M:"
+# column is the cpu each handler ran on; INTRCPUS counts the distinct
+# cpus that took a device (non-timer, non-swi) interrupt: 3 with -s 4
+# (virtio irq 20, ahci 21, xhci 22 -> cpus 0, 1, 2).
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send dd if=/dev/zero of=/dev/da0 bs=64k count=512 2>/dev/null; dd if=/dev/da0 of=/dev/null bs=64k count=512 2>/dev/null; echo "D""A0 ok"\r
+expect DA0 ok
+send dd if=/dev/zero of=/dev/da8 bs=64k count=512 2>/dev/null; dd if=/dev/da8 of=/dev/null bs=64k count=512 2>/dev/null; echo "D""A8 ok"\r
+expect DA8 ok
+send vmstat -iv\r
+expect #
+send vmstat -iv | awk '$1 ~ /^irq/ && $3 !~ /^(swi|timer|ipi)/ && $(NF-1) > 0 { print $2 }' | sort -u | wc -l | sed 's/^ */INTR''CPUS /'\r
+expect INTRCPUS 3
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

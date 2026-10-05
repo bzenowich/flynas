@@ -1,0 +1,17 @@
+# vmexpect.py script for run-storage.sh EXP=copytest.exp (review-10-05
+# P1): runs /root/copytest (tools/arm-smoke/copytest.c, built with the
+# kernel's memcpy.S; see that file) on the booted kernel, once on the
+# UFS root and once on tmpfs.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send /root/copytest /root/ct.dat | sed 's/^/R''1 /'\r
+expect R1 COPYTEST ok
+send mkdir -p /tmp/t && mount -t tmpfs tmpfs /tmp/t && /root/copytest /tmp/t/ct.dat | sed 's/^/R''2 /'\r
+expect R2 COPYTEST ok
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

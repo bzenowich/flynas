@@ -1,0 +1,29 @@
+# vmexpect.py script for run-storage.sh EXP=ntp.exp (review-10-05, time):
+# dntpd -s must set the clock during rc, right after the network is up
+# and before syslogd and the services start, then stay in the
+# background.  The caller installs the new dntpd and rc.d files, a fake
+# NTP server (fakentp.c) on localhost started by rc.d/fakentp just
+# before dntpd, reporting 2030, and passes
+#   RCCONF='dntpd_enable="YES" dntpd_flags="-s -w 10 localhost" fakentp_enable="YES"'
+# Then -s with no server answering must give up after -w seconds and
+# still go into the background.
+expect issuing COARSE offset adjustment
+expect Starting syslogd
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send date -u +%Y | sed 's/^/YE''AR /'\r
+expect YEAR 2030
+send pgrep -q dntpd && echo "DAE""MON ok"\r
+expect DAEMON ok
+send rcorder /etc/rc.d/* 2>/dev/null | grep -nE '/(NETWORKING|savetime|fakentp|dntpd|mountcritremote|syslogd|SERVERS)$'\r
+expect #
+send dntpd -Q >/dev/null 2>&1; s=$(date +%s); dntpd -s -w 3 127.0.0.2; e=$(date +%s); echo "WAIT $((e - s))s"; pgrep -q dntpd && echo "BACK""GROUND ok"\r
+expect no server answered within 3 seconds
+expect BACKGROUND ok
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

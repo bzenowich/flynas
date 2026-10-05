@@ -1,0 +1,32 @@
+# vmexpect.py script for run-storage.sh EXP=bounce.exp (review-10-05 R5):
+# storage.exp under a DMA limit, so AHCI and xhci transfers above it go
+# through bounce pages.  Run with KENV=hw.busdma.lowaddr=0x5fffffff (or a
+# -dtb with dma-ranges, see mkdtb-dma.py) and -m 2G: RAM is
+# 0x40000000-0xbfffffff, so three quarters of it is out of reach.  After
+# the storage.exp checks it prints each bounce zone and requires that
+# some page was bounced.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send ls /dev/da0 /dev/da8 | wc -l | sed 's/^ */D''EVS /'\r
+expect DEVS 2
+send dd if=/dev/random of=/tmp/p bs=1m count=32 2>/dev/null; echo "RAN""DOM ok"\r
+expect RANDOM ok
+send dd if=/tmp/p of=/dev/da0 bs=64k 2>/dev/null; dd if=/dev/da0 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A0 ok"\r
+expect DA0 ok
+send dd if=/tmp/p of=/dev/da8 bs=64k 2>/dev/null; dd if=/dev/da8 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A8 ok"\r
+expect DA8 ok
+send sysctl -n hw.busdma.audit_reports | sed 's/^/AUD''IT /'\r
+expect AUDIT 0
+send sysctl hw.busdma | grep -e lowaddr -e total_bounced -e total_bpages\r
+expect #
+send sysctl hw.busdma | awk '/total_bounced/ { n += $2 } END { print (n > 0 ? "BOUNCE yes " n : "BOUNCE no") }' | sed 's/^/R/'\r
+expect RBOUNCE yes
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

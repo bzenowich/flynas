@@ -17,6 +17,8 @@
 # if=none,file=d.img,format=raw,id=d0 -device virtio-blk-device,drive=d0).
 # ARM_VM_MONITOR=PATH puts the QEMU monitor on a unix socket (e.g. for
 # "info registers -a" on a hung guest: socat - UNIX-CONNECT:PATH).
+# ARM_VM_REBOOT=1 lets a guest reboot restart the machine (the PL031 RTC
+# keeps its time across that) instead of exiting QEMU.
 #
 # The serial console is on stdio and is also teed to logs/arm-vm.log.
 # There is no KVM for an aarch64 guest on an x86 host, so this is always TCG:
@@ -50,7 +52,8 @@ kernel="${1:-$REPO/tools/kobj/ARM64_VIRT/kernel.bin}"
 
 mkdir -p "$REPO/logs"
 set -- -M "$MACHINE" -cpu cortex-a72 -smp "$smp" -m "$mem" \
-    -nographic -no-reboot -kernel "$kernel"
+    -nographic -kernel "$kernel"
+[ -n "${ARM_VM_REBOOT:-}" ] || set -- "$@" -no-reboot
 [ -n "$append" ] && set -- "$@" -append "$append"
 [ -n "$initrd" ] && set -- "$@" -initrd "$initrd"
 [ $gdb -eq 1 ] && set -- "$@" -S -gdb tcp:127.0.0.1:1234

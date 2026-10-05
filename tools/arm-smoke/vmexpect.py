@@ -6,16 +6,62 @@
 SCRIPT lines: "expect TEXT" waits up to -w seconds (default 120) for TEXT
 in the console output; "send STRING" writes STRING, with Python escapes
 (\\r, \\x03), one character every 20 ms like a typist, so that nothing
-outruns the receive FIFO.  Blank lines and lines starting with # are
-skipped.  Exits 0 when every expect matched; on a timeout or when QEMU
-exits early, prints which line failed and exits 1.  QEMU is stopped at
-the end either way.  The console is still teed to logs/arm-vm.log.
+outruns the receive FIFO; "monitor COMMAND" sends a QEMU monitor (HMP)
+command, e.g. "monitor drive_del d3", through the unix socket named by
+$ARM_VM_MONITOR (bin/arm-vm passes it to QEMU's -monitor).  Blank lines
+and lines starting with # are skipped.  Exits 0 when every expect
+matched; on a timeout or when QEMU exits early, prints which line failed
+and exits 1.  QEMU is stopped at the end either way.  The console is
+still teed to logs/arm-vm.log.
 """
 import os
 import select
+import socket
 import subprocess
 import sys
 import time
+
+
+def hmp(path, cmd):
+    """Run one HMP command on QEMU's monitor socket, echoing its reply.
+
+    Waits for the banner's prompt before sending, then for the prompt
+    that follows the command; closing earlier can drop the command."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    for _ in range(50):
+        try:
+            s.connect(path)
+            break
+        except OSError:
+            time.sleep(0.1)
+    s.settimeout(10)
+
+    def until_prompt(buf):
+        try:
+            while b'(qemu)' not in buf:
+                data = s.recv(4096)
+                if not data:
+                    break
+                buf += data
+        except socket.timeout:
+            pass
+        return buf
+
+    until_prompt(b'')
+    s.sendall(cmd.encode() + b'\n')
+    reply = b''
+    try:
+        while b'(qemu)' not in reply.split(cmd.encode(), 1)[-1] or \
+                cmd.encode() not in reply:
+            data = s.recv(4096)
+            if not data:
+                break
+            reply += data
+    except socket.timeout:
+        pass
+    s.close()
+    sys.stdout.write('\n[monitor] %s\n' % reply.decode(errors='replace'))
+    sys.stdout.flush()
 
 
 def main():
@@ -36,7 +82,9 @@ def main():
             op, _, arg = ln.partition(' ')
             if op == 'send':
                 arg = arg.encode().decode('unicode_escape').encode('latin-1')
-            elif op != 'expect':
+            elif op == 'monitor' and not os.environ.get('ARM_VM_MONITOR'):
+                sys.exit('vmexpect: monitor needs ARM_VM_MONITOR')
+            elif op not in ('expect', 'monitor'):
                 sys.exit('vmexpect: bad line: %s' % ln)
             steps.append((op, arg))
 
@@ -54,6 +102,9 @@ def main():
                     p.stdin.write(bytes([c]))
                     p.stdin.flush()
                     time.sleep(0.02)
+                continue
+            if op == 'monitor':
+                hmp(os.environ['ARM_VM_MONITOR'], arg)
                 continue
             want = arg.encode()
             end = time.time() + wait

@@ -1,0 +1,30 @@
+# vmexpect.py script for run-storage.sh EXP=time.exp with ARM_VM_REBOOT=1
+# (review-10-05, time): settimeofday must reach the PL031 (resettodr), so
+# a clock set back to 2024 survives a reboot of the same QEMU machine
+# (the PL031 would otherwise still count from the host's time, and
+# inittodr keeps the later of it and the root's time); then
+# rc.d/savetime (copied into the root by the caller) must step a clock
+# that is behind /var/db/savetime forward to it.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send date -u 202401020304 >/dev/null; echo "SE""T ok"\r
+expect SET ok
+send reboot\r
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send date -u +%Y | sed 's/^/YE''AR /'\r
+expect YEAR 2024
+send touch -t 204001010000 /var/db/savetime; sh /etc/rc.d/savetime onestart\r
+expect Clock set forward
+send date -u +%Y | sed 's/^/SAV''ED /'\r
+expect SAVED 2040
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

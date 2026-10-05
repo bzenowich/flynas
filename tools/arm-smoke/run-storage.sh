@@ -8,7 +8,10 @@
 #   -n  reuse WORK/root from an earlier run (only redo the images)
 # WAIT= sets the expect timeout per step (default 900 s).  EXP= replaces
 # storage.exp (flush.exp: cache flushes on the usb-storage disk), USBSIZE=
-# sizes the usb-storage image (default 64m).
+# sizes the usb-storage image (default 64m), KENV= adds kernel
+# environment variables (e.g. KENV=hw.busdma.lowaddr=0x5fffffff), DTB=
+# replaces QEMU's device tree (see fdt-addprop.py), RCCONF= adds lines to
+# the guest's rc.conf.
 D=$(cd "$(dirname "$0")/../.." && pwd)
 T="$D/tools/arm-smoke"
 reuse=0
@@ -25,6 +28,7 @@ R="$W/root"
 printf '/dev/vbd0\t/\tufs\trw\t1\t1\n' > "$R/etc/fstab"
 cat > "$R/etc/rc.conf" <<EOI
 hostname="arm64-virt"
+${RCCONF:-}
 EOI
 "$D/bin/arm-mkimg" -s 400m "$R" "$W/root.img"
 for d in sata usb; do
@@ -39,6 +43,7 @@ ARM_VM_ARGS="-nic none
     -drive if=none,file=$W/sata.img,format=raw,id=d1
     -device ahci,id=ahci -device ide-hd,drive=d1,bus=ahci.0
     -drive if=none,file=$W/usb.img,format=raw,id=d2
-    -device qemu-xhci,id=xhci -device usb-storage,drive=d2,bus=xhci.0" \
+    -device qemu-xhci,id=xhci -device usb-storage,drive=d2,bus=xhci.0
+    ${DTB:+-dtb $DTB}" \
     "$T/vmexpect.py" -w "${WAIT:-900}" "${EXP:-$T/storage.exp}" -- \
-    -m 2G -t 0 -a "vfs.root.mountfrom=ufs:vbd0 hw.busdma.debug=3" "$@"
+    -m 2G -t 0 -a "vfs.root.mountfrom=ufs:vbd0 hw.busdma.debug=3${KENV:+ $KENV}" "$@"

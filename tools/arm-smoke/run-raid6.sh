@@ -10,12 +10,11 @@
 # ARM64_R6 (tools/kobj/ARM64_R6) and sbin/{newfs_hammer2,hammer2} built
 # with DFLY_SRC=R6SRC bin/arm-world.  H2R6= points at hammer2-raid6.
 # R6GROUPS= picks run_all.sh groups (default all); EXP= replaces raid6.exp
-# (e.g. to run one group under sh -x); KERNEL= boots another kernel.bin;
-# WAIT= sets the expect
-# timeout per step (default 6 h, since run_all.sh prints each group only
-# when it ends).  ROOTSIZE= sizes the root image (default 600m; group N
-# keeps a 512 MB file in /var/tmp, so give it 1200m).  R6BUS=mmio: see
-# below.
+# (e.g. to run one group under sh -x, or pull.exp); KERNEL= boots another
+# kernel.bin; WAIT= sets the expect timeout per step (default 6 h, since
+# run_all.sh prints each group only when it ends).  ROOTSIZE= sizes the
+# root image (default 600m; group N keeps a 512 MB file in /var/tmp, so
+# give it 1200m).  R6BUS=mmio: see below.
 D=$(cd "$(dirname "$0")/../.." && pwd)
 T="$D/tools/arm-smoke"
 reuse=0
@@ -72,7 +71,9 @@ else
 fi
 
 rc=0
-ARM_VM_ARGS="-nic none $args" \
+# pull.exp pulls a disk through the monitor (vmexpect.py "monitor")
+rm -f "$W/monitor.sock"
+ARM_VM_MONITOR="$W/monitor.sock" ARM_VM_ARGS="-nic none $args" \
     "$T/vmexpect.py" -w "${WAIT:-21600}" "$W/raid6.exp" -- \
     -m 2G -t 0 -a "vfs.root.mountfrom=ufs:vbd0" "$@" \
     "${KERNEL:-$D/tools/kobj/ARM64_R6/kernel.bin}" || rc=$?
