@@ -235,13 +235,29 @@ FreeBSD `critical_enter`.
    ioctl reports it. HAMMER2 warns at a read-write mount about members that
    cannot flush. Still to check on the Pi: whether the VL715 accepts the
    command.
-3. **Early Phase 6:**
-   - R5 DMA limits and bounce;
-   - S1/P3 interrupt spreading;
-   - P1 copy routines;
-   - P2 asynchronous parity and mirror writes;
-   - R4 pulled-disk handling, with a pull-during-write test;
-   - watchdog, time, entropy.
+3. ~~**Early Phase 6:**~~ **Done 2026-10-05** (`dfly-arm.md` Progress 5g).
+   - R5: `dma-ranges` gives simplebus and the PCIe bridge a windowed tag,
+     tags carry a bus offset, and NULL-parent tags get the strictest
+     window as `lowaddr`. Bouncing is tested on QEMU (tunable and a
+     patched DTB); a non-zero bus offset is not, since QEMU has none.
+   - S1/P3: SPIs go round-robin over the cpus (`hw.gic.irq_balance`,
+     `hw.gic.irq.N.cpu`). MSI (brcmstb) is still Phase 6 proper.
+   - P1: 64-byte `ldp`/`stp` loops in `mem*` and `ldtr`/`sttr` loops in
+     `copyin`/`copyout`, checked over every alignment and length.
+   - P2: P/Q, mirror and zero-column writes are started together and
+     waited for once.
+   - R4: the flush fails a member whose delayed writes returned EIO and
+     invalidates its buffers. The new pull-during-write test
+     (`pull.exp`) passes, but it passes on the old code too: the parity
+     writes already catch the pulled disk. The new path is a backstop
+     that no test reaches yet.
+   - Watchdog (`bcmwd`, also the reset path without PSCI) and entropy
+     (`bcmrng`, RNG200) are compile-tested only; QEMU has neither
+     device. Time: the PL031 is written back by `resettodr`, the clock
+     never starts before the root fs time, `rc.d/savetime` covers boards
+     without an RTC, and `dntpd -s` (now the default) sets the clock
+     from pool.ntp.org right after NETWORKING, before the services. It
+     was tested against a fake NTP server; the real pool is untested.
 4. **Phase 9:**
    - P5 NEON parity (after `fpu_kern_enter`);
    - S2/S3 finer pmap locking and batched TLBI;

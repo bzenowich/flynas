@@ -25,7 +25,11 @@ rewritten suite (2026-10-04) runs 123/0 on arm64 `-smp 2`, over both
 virtio-mmio and virtio-pci, and the MI changes pass the x86 check
 (Progress 5f). The 2026-10-05 review (`review-10-05.md`) found
 ordering, stub and durability bugs QEMU cannot show; its first batch of
-fixes is in Progress 5f. Next: Phase 6.
+fixes is in Progress 5f. The Pi groundwork that QEMU can test is in
+Progress 5g: DMA windows and bouncing, interrupt spreading, faster copy
+routines, async parity writes, pulled-disk handling, RTC write-back, and
+dntpd setting the clock at boot. The watchdog and RNG drivers are
+written. Next: Phase 6.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1552,6 +1556,79 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
     remount. **x86 check of these MI changes is pending** (needs h2dev
     up on the host).
 
+**Progress 5g (2026-10-05): review §6 item 3, the Pi groundwork QEMU can test.**
+- **R5, DMA limits** (fork `ad8d0da4f7`):
+  - `busdma_fdt.c` parses a bus node's `dma-ranges`. simplebus and the
+    FDT PCIe bridge return a windowed tag from `bus_get_dma_tag`.
+  - Tags carry a bus offset, which a load adds to each segment.
+    `lowaddr` stays a physical limit, so bounce pages and dmamem come
+    from below it.
+  - Tags with a NULL parent (most DragonFly drivers) get the strictest
+    window in the tree as `lowaddr`, or the tunable `hw.busdma.lowaddr`.
+  - `MAX_BPAGES` is now 4096 (16 MB per zone).
+  - Test: `bounce.exp` with `run-storage.sh`, using `KENV=hw.busdma.lowaddr=...`
+    or `DTB=` made by `fdt-addprop.py`. AHCI and usb-storage bounce
+    thousands of pages, the data matches, and the sync audit stays at 0.
+  - Untested: a non-zero bus offset (QEMU has none).
+- **S1/P3, interrupts** (fork `db037a5749`):
+  - SPI n goes to cpu n % ncpus, and `intr_setup` points its
+    ITARGETSR byte at the cpu that holds the handler.
+  - `hw.gic.irq_balance=0` restores the old routing, and
+    `hw.gic.irq.N.cpu` pins one irq.
+  - `intr.exp`, `-smp 4`: virtio, ahci and xhci are taken on cpus 0, 1
+    and 2.
+  - MSI (the brcmstb controller) is part of Phase 6 step 4.
+- **P1, copy routines** (fork `7c1650325b`): `memcpy.S` runs 64-byte
+  `ldp`/`stp` loops, and `copyin`/`copyout` run 64-byte `ldtr`/`sttr`
+  loops. `copytest.exp` checks every alignment 0–15 against every length
+  0–300 plus large ones, `memmove` in both directions, and faults on an
+  unmapped page.
+- **P2 and R4, overlay** (hammer2-raid6 `3fd8eb5`):
+  - P/Q, mirror and zero-column writes are started together
+    (`hammer2_bwrite_start`) and waited for once.
+  - The flush checks each member vnode's write-error count, fails a
+    member whose delayed writes returned EIO, and invalidates that
+    member's buffers.
+  - `pull.exp` (`EXP=` for `run-raid6.sh`, which uses `ARM_VM_MONITOR`)
+    has QEMU `drive_del` a member 3 s into a 200 MB copy. The copy and
+    sync must finish, the disk must be FAILED, and the file must match,
+    both cached and from a degraded remount: 28/28.
+  - The test passes on the old overlay too: the parity writes, which
+    were already checked (R3), catch the pulled disk. The new scan is a
+    backstop that no test reaches yet.
+- **Time** (fork `63d6773139`, `1bc64454c4`):
+  - `inittodr` starts a stopped PL031 and never sets the clock earlier
+    than the root fs time. `resettodr` writes the PL031 back, and must
+    use `nanotime()`, because `getnanotime()` is stale right after
+    `set_timeofday()`.
+  - `rc.d/savetime` (off by default) steps a board without an RTC (the
+    Pi) forward to the time saved at shutdown.
+  - `dntpd -s` was an `XXX`. It now queries the servers before
+    daemonizing, steps to the median of up to 3 offsets, and gives up
+    after `-w` seconds (15), leaving the step to the daemon. `-s` is the
+    default flag, and `rc.d/dntpd` runs right after NETWORKING (before
+    `mountcritremote` and syslogd), so the services start with the time
+    from pool.ntp.org (`dntpd.conf`'s `N.dragonfly.pool.ntp.org`).
+  - `time.exp`: the PL031 keeps a set date across a reboot, and savetime
+    steps forward (23/23).
+  - `ntp.exp` uses `fakentp.c`, a fake server on localhost, with
+    `RCCONF=` (`run-storage.sh`). The step lands before syslogd starts,
+    and an unreachable server times out and still daemonizes (20/20).
+  - Untested: the real pool and DHCP on boot (no network in the
+    sandbox). Cosmetic: the step message appears twice on the console.
+- **Watchdog and entropy** (fork `1f260d2c87`):
+  - `bcmwd` (BCM2835 PM watchdog) registers with the wdog framework
+    (15 s maximum) and provides `cpu_reset_hook` for `reboot` without
+    PSCI.
+  - `bcmrng` feeds the RNG200 FIFO to the csprng as `RAND_SRC_RNG200`.
+  - Both are compile-tested only; they attach on the Pi.
+  - The license comments in `dump_machdep.c` and `sysarch.c` were not
+    closed (fork `c7d8a7f9a2`).
+- **Suite:** the RAID6 suite on the final kernel (`R6BUS=pci -s 2`):
+  running (result to follow).
+- **x86 check pending** for the MI parts: `random.h`, dntpd, the rc
+  files, and the earlier xhci, da, pipe and lwkt changes.
+
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
 Order matters: console, then SD, then USB, then network.
@@ -1588,8 +1665,12 @@ Order matters: console, then SD, then USB, then network.
      in) or the mailbox.
 6. **Housekeeping:**
    - GPIO for the activity LED as a disk/heartbeat indicator.
-   - `bcm2711-rng200` feeding `kern_nrandom`.
-   - Watchdog, for `reboot` via PM_RSTC or PSCI.
+   - `bcm2711-rng200` feeding `kern_nrandom`: written (`bcmrng`,
+     Progress 5g); check that it attaches and harvests.
+   - Watchdog, for `reboot` via PM_RSTC or PSCI: written (`bcmwd`,
+     Progress 5g); check `reboot` and a watchdog timeout.
+   - Time: with no RTC, enable `savetime` and check that `dntpd -s` sets
+     the clock from the pool at boot (Progress 5g).
    - Thermal sensor (`brcm,bcm2711-thermal`) for the FlyNAS dashboard.
    - cpufreq via the mailbox: optional.
 7. **8 GB board:** run with the RAM above 960 MB enabled and confirm that
@@ -1924,8 +2005,9 @@ DragonFly hardware.
      NIC. 5b–5d are done too (ECAM, busdma, AHCI, xhci + umass), and
      the Phase 5 exit test passed (Progress 5e). The x86 check is
      done, and the rewritten RAID6 suite runs 123/0 (Progress 5f).
-     Next: the rest of `review-10-05.md` §6, then Phase 6 (Pi 4
-     bring-up).
+     `review-10-05.md` §6 items 1–3 are done (Progress 5f, 5g). Next:
+     the pending x86 check, then Phase 6 (Pi 4 bring-up). Item 4
+     waits for Phase 9.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
