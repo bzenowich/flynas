@@ -1,0 +1,43 @@
+# vmexpect.py script for run-storage.sh EXP=flush.exp (review-10-05 R1):
+# cache flushes on the usb-storage disk (umass, da8).  Needs a kernel
+# with the da SYNCHRONIZE CACHE change and the RAID6 overlay's mount
+# check (KERNEL=.../ARM64_R6/kernel.bin) and USBSIZE=1g.
+# 1. QEMU's usb-storage accepts SYNCHRONIZE CACHE: a hammer2 mount
+#    flushes da8, sync_cache stays 1 and nothing warns.
+# 2. umass's NO_SYNC_CACHE quirk (forced with usbconfig, then a
+#    detach and re-attach through set_config) fakes ILLEGAL REQUEST: da
+#    must quirk the disk and warn, the flush must still succeed, hammer2
+#    must warn at mount, and its data must survive a remount.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send newfs_hammer2 -L T /dev/da8 >/dev/null 2>&1 && echo "NE""WFS ok"\r
+expect NEWFS ok
+send mkdir -p /mnt && mount_hammer2 /dev/da8@T /mnt && echo "MO""UNT1 ok"\r
+expect MOUNT1 ok
+send echo one > /mnt/f && sync && echo "SY""NC1 ok"\r
+expect SYNC1 ok
+send echo "SC1 $(sysctl -n kern.cam.da.8.sync_cache) W1 $(dmesg | grep -cE 'cannot flush|not supported')" | sed 's/^/R''ES /'\r
+expect RES SC1 1 W1 0
+send umount /mnt && echo "UM""OUNT1 ok"\r
+expect UMOUNT1 ok
+send usbconfig add_dev_quirk_vplh 0x46f4 0x0001 0 0xffff UQ_MSC_NO_SYNC_CACHE && echo "QU""IRK ok"\r
+expect QUIRK ok
+send U=$(usbconfig list | grep -iE 'qemu|storage' | head -1 | cut -d: -f1); echo "UGEN $U"; usbconfig -d $U set_config 255; sleep 2; usbconfig -d $U set_config 0; sleep 5; ls /dev/da8 && echo "RE""ATTACH ok"\r
+expect REATTACH ok
+send mount_hammer2 /dev/da8@T /mnt && echo "MO""UNT2 ok"\r
+expect MOUNT2 ok
+send echo two > /mnt/g && sync && echo "SY""NC2 ok"\r
+expect SYNC2 ok
+send echo "SC2 $(sysctl -n kern.cam.da.8.sync_cache) DA $(dmesg | grep -c 'SYNCHRONIZE CACHE not supported') H2 $(dmesg | grep -c 'da8 cannot flush')" | sed 's/^/R''ES /'\r
+expect RES SC2 0 DA 1 H2 1
+send umount /mnt && mount_hammer2 /dev/da8@T /mnt && cat /mnt/f /mnt/g | tr '\n' ' ' | sed 's/^/DA''TA /'; echo\r
+expect DATA one two
+send umount /mnt; echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

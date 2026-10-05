@@ -6,7 +6,9 @@
 # sync audit.
 #   run-storage.sh [-n] WORK [-- arm-vm args...]
 #   -n  reuse WORK/root from an earlier run (only redo the images)
-# WAIT= sets the expect timeout per step (default 900 s).
+# WAIT= sets the expect timeout per step (default 900 s).  EXP= replaces
+# storage.exp (flush.exp: cache flushes on the usb-storage disk), USBSIZE=
+# sizes the usb-storage image (default 64m).
 D=$(cd "$(dirname "$0")/../.." && pwd)
 T="$D/tools/arm-smoke"
 reuse=0
@@ -27,8 +29,9 @@ EOI
 "$D/bin/arm-mkimg" -s 400m "$R" "$W/root.img"
 for d in sata usb; do
     rm -f "$W/$d.img"
-    truncate -s 64m "$W/$d.img"
 done
+truncate -s 64m "$W/sata.img"
+truncate -s "${USBSIZE:-64m}" "$W/usb.img"
 
 ARM_VM_ARGS="-nic none
     -drive if=none,file=$W/root.img,format=raw,id=d0
@@ -37,5 +40,5 @@ ARM_VM_ARGS="-nic none
     -device ahci,id=ahci -device ide-hd,drive=d1,bus=ahci.0
     -drive if=none,file=$W/usb.img,format=raw,id=d2
     -device qemu-xhci,id=xhci -device usb-storage,drive=d2,bus=xhci.0" \
-    "$T/vmexpect.py" -w "${WAIT:-900}" "$T/storage.exp" -- \
+    "$T/vmexpect.py" -w "${WAIT:-900}" "${EXP:-$T/storage.exp}" -- \
     -m 2G -t 0 -a "vfs.root.mountfrom=ufs:vbd0 hw.busdma.debug=3" "$@"
