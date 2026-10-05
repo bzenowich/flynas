@@ -1625,7 +1625,7 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   - The license comments in `dump_machdep.c` and `sysarch.c` were not
     closed (fork `c7d8a7f9a2`).
 - **Suite:** the RAID6 suite on the final kernel (`R6BUS=pci -s 2`):
-  running (result to follow).
+  123 pass, 0 fail, no panics.
 - **x86 check pending** for the MI parts: `random.h`, dntpd, the rc
   files, and the earlier xhci, da, pipe and lwkt changes.
 
