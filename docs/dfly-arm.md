@@ -20,8 +20,12 @@ DTB, and the installed world boots from a virtio-mmio disk with a
 virtio-mmio NIC (see Progress 5a). PCIe ECAM, busdma with cache
 maintenance, AHCI and xhci + usb-storage work too (Progress 5b–5d).
 **Phase 5's exit test passed** (2026-10-03): the hammer2 RAID6 suite,
-forward-ported to master, runs 65/65 on 4 virtio disks (Progress 5e).
-Left before Phase 6: the x86 check of the MI changes.
+forward-ported to master, runs on 4 virtio disks (Progress 5e). The
+rewritten suite (2026-10-04) runs 123/0 on arm64 `-smp 2`, over both
+virtio-mmio and virtio-pci, and the MI changes pass the x86 check
+(Progress 5f). The 2026-10-05 review (`review-10-05.md`) found
+ordering, stub and durability bugs QEMU cannot show; its first batch of
+fixes is in Progress 5f. Next: Phase 6.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1485,6 +1489,69 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
 - **x86 check pending** now also covers `kern_dmsg.c` and the overlay
   built against master.
 
+**Progress 5f (2026-10-04 – 10-05): suite rewrite, two arm64 bugs, review fixes.**
+- **The 65/65 above was vacuous.** An audit against mdadm's tests found
+  checks that could not fail. `hammer2-raid6/tests/v3` was rewritten
+  (groups A–N), which exposed kernel bugs that were all fixed, and the
+  2 GB volume limit went away (space map + v3 bulkfree). The rewritten
+  suite runs **123 pass, 0 fail** on x86 and on arm64 `-smp 2`.
+- **pmap wire bug** (fork `9e9f1a4a9a`). `pmap_enter` took the page wire
+  only for managed mappings, so pages `kmem_alloc`'d wired before
+  `pmap_init` (the pv zone's boot store) had wire count 0. Group N's
+  24 GB churn let the pagedaemon free one, and file data overwrote live
+  pv entries (panic in `pmap_remove`). A software PTE bit
+  (`ATTR_SW_PGWIRED`) now records that the PTE holds a wire, as on x86.
+- **"PCI INTx with SMP" was a vtblk bug** (fork `d9ccd244ad`, MI).
+  vtblk sized its queues from the MSI-X count and demanded one vector per
+  queue. With no MSI controller on arm64 the legacy fallback gives one
+  vector, so attach failed with ENXIO. vtblk now shrinks to the vectors it
+  gets. Suite with `R6BUS=pci -s 2`: 123/0. The x86 check passed (x86
+  gets full MSI-X, so it does not take the shrink path).
+- **Review fixes, batch 1** (`review-10-05.md` §6 item 1 and R1):
+  - `sysarch(2)`, `cpu_set_iopl`/`cpu_clr_iopl` return `EOPNOTSUPP` and
+    `md_dumpsys` prints that dumps are unsupported; none panic any more.
+  - Ordering (O1–O5): `cpu_sfence`/`cpu_mfence` are `dmb osh` and
+    `cpu_lfence` is `dmb oshld`. x86 is TSO, so MI code uses
+    `cpu_sfence` as a release barrier, and DMA devices sit in the outer
+    shareable domain. `bus_space` writes start with `dmb oshst`, which
+    orders Normal-memory stores (descriptors) before a doorbell write.
+    `bus_space_barrier` uses `dsb`. `load_acq`/`store_rel` get the
+    missing `dmb ish`. `_bus_dmamap_sync` issues `dsb sy` for
+    PREREAD/PREWRITE/POSTREAD even when no cache maintenance is needed
+    (Normal-NC dmamem). MI: xhci reads the event TRB only after its
+    cycle bit (`cpu_lfence`); `sys_pipe` and `lwkt_switch_return` fence
+    before the stores that publish.
+  - **USB flushes (R1).** `da` used to set `DA_Q_NO_SYNC_CACHE` for every
+    umass device, so `BUF_CMD_FLUSH` did nothing on USB disks. It now
+    sends SYNCHRONIZE CACHE, and sets the quirk with a console warning
+    only when the device rejects it (ILLEGAL REQUEST or
+    `CAM_REQ_INVALID`); that flush then completes as success. A bridge
+    that hangs instead needs the loader tunable
+    `kern.cam.da.umass_sync_cache=0` (the old behaviour).
+    `kern.cam.da.N.sync_cache` shows and sets the state, and the new
+    `DIOCGFLUSHCAP` ioctl reports it. HAMMER2 flushes each member at a
+    read-write mount, asks `DIOCGFLUSHCAP`, and warns about members that
+    cannot flush.
+  - Overlay (R2, R3): the per-disk fsync loop keeps the first error. A
+    RAID6 member that fails to sync is auto-failed, so the headers still
+    go to the healthy members. P/Q, zero-fill and rebuild-column write
+    errors now reach `hammer2_raid6_write_failed()`: a healthy member is
+    auto-failed, and a write error on the disk being resilvered fails the
+    resilver.
+  - Commits: fork `e53e96d01f` (stubs), `6159fec48b` (arm64 ordering),
+    `d9182c584f` (pipe, lwkt), `6ff70b9e26` (xhci), `a559cf9187` (da);
+    hammer2-raid6 `3c5c48f` (R2/R3), `6ede151` (mount warning),
+    `b368139` (patch).
+  - Tests, arm64 `-smp 2`: the RAID6 suite (`R6BUS=pci`) 123/0;
+    `run-storage.sh` (busdma audit 0); and the new
+    `EXP=tools/arm-smoke/flush.exp USBSIZE=1g run-storage.sh -n WORK --
+    -s 2 KERNEL`, 31/31. That test mounts hammer2 on the usb-storage disk
+    with flushes working (no warnings), then forces umass's
+    `UQ_MSC_NO_SYNC_CACHE` with `usbconfig add_dev_quirk_vplh` and
+    re-attaches. `da` and hammer2 must warn, and the data must survive a
+    remount. **x86 check of these MI changes is pending** (needs h2dev
+    up on the host).
+
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
 Order matters: console, then SD, then USB, then network.
@@ -1855,9 +1922,10 @@ DragonFly hardware.
      installworld into a UFS image, and a multi-user boot with sshd.
    - Phase 5a is done (Progress 5a): FDT newbus, virtio-mmio disk and
      NIC. 5b–5d are done too (ECAM, busdma, AHCI, xhci + umass), and
-     the Phase 5 exit test passed (Progress 5e: RAID6 suite 65/65 on
-     master). Next: the x86 check of all MI changes in h2dev
-     (`bin/arm-x86build`), then Phase 6 (Pi 4 bring-up).
+     the Phase 5 exit test passed (Progress 5e). The x86 check is
+     done, and the rewritten RAID6 suite runs 123/0 (Progress 5f).
+     Next: the rest of `review-10-05.md` §6, then Phase 6 (Pi 4
+     bring-up).
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
