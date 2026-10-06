@@ -1,0 +1,29 @@
+# vmexpect.py script for run-storage.sh KMODS=1 EXP=kmod.exp (with -- -s 2)
+# Kernel modules: kldload msdos.ko by name from /boot/kernel (an ET_REL
+# object relocated by link_elf_obj against the kernel's .dynsym), use it
+# for a real FAT filesystem on the AHCI disk, then kldunload it.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect ~ #
+send exec /bin/sh\r
+expect #
+send kldload msdos && echo "KL""D ok"\r
+expect KLD ok
+send echo N=$(kldstat | grep -c msdos.ko)\r
+expect N=1
+send lsvfs | grep -c msdos | sed 's/^/V''FS /'\r
+expect VFS 1
+send newfs_msdos -F 16 /dev/da0 >/dev/null && mount_msdos /dev/da0 /mnt && echo "MO""UNT ok"\r
+expect MOUNT ok
+send cp /etc/rc /mnt/rc && umount /mnt && mount_msdos /dev/da0 /mnt && cmp /etc/rc /mnt/rc && umount /mnt && echo "F""AT ok"\r
+expect FAT ok
+send kldunload msdos && echo N=$(kldstat | grep -c msdos.ko)\r
+expect N=0
+send kldload msdos && echo "RE""LOAD ok"\r
+expect RELOAD ok
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

@@ -14,6 +14,8 @@
 # the guest's rc.conf.  DUMPSIZE= adds a second virtio disk of that size
 # (vbd1) for crash dumps and installs the kernel as /boot/kernel/kernel
 # (dump.exp); set ARM_VM_REBOOT=1 with it so the guest can reboot.
+# KMODS=1 installs the modules built for KERNCONF (bin/arm-kbuild ...
+# modules) into /boot/kernel (kmod.exp).
 D=$(cd "$(dirname "$0")/../.." && pwd)
 T="$D/tools/arm-smoke"
 reuse=0
@@ -39,6 +41,12 @@ if [ -n "${DUMPSIZE:-}" ]; then
     truncate -s "$DUMPSIZE" "$W/dump.img"
     DUMPARGS="-drive if=none,file=$W/dump.img,format=raw,id=d3
     -device virtio-blk-pci,drive=d3"
+fi
+if [ -n "${KMODS:-}" ]; then
+    mkdir -p "$R/boot/kernel"
+    rm -f "$R"/boot/kernel/*.ko
+    find "$D/tools/kobj/${KERNCONF:-ARM64_VIRT}" -name '*.ko' \
+        -exec install -m 555 {} "$R/boot/kernel/" \;
 fi
 "$D/bin/arm-mkimg" -s ${ROOTSIZE:-400m} "$R" "$W/root.img"
 for d in sata usb; do
