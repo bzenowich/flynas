@@ -1,0 +1,16 @@
+# vmexpect.py script for run-netmgmt.sh (@W@ is filled in).  Nothing is
+# typed on the console: everything after boot goes over ssh on the NIC.
+expect login:
+host @W@/gssh 'uname -sm; ifconfig vtnet0' | tee @W@/ifc.out; grep -q 'inet 10\.0\.2\.15 ' @W@/ifc.out
+host @W@/gssh 'pgrep -lx dhclient' | grep dhclient
+host @W@/gssh 'netstat -rn -f inet' | grep -E '^(default|0\.0\.0\.0) +10\.0\.2\.2 '
+host @W@/gssh 'cat /etc/resolv.conf' | grep '^nameserver 10\.0\.2\.3'
+host @W@/gssh 'sockstat -4 -6 -l' | grep -E 'sshd .*[*:.]22 '
+# Reboot over ssh: DHCP and sshd must come back unattended, with the
+# host key from the first boot (gssh checks it strictly after the first
+# connection).
+host @W@/gssh 'shutdown -r now' || true
+expect login:
+host @W@/gssh 'echo NET''MGMT again; uptime'
+host @W@/gssh 'shutdown -p now' || true
+expect Uptime:

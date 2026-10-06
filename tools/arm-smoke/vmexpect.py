@@ -8,7 +8,9 @@ in the console output; "send STRING" writes STRING, with Python escapes
 (\\r, \\x03), one character every 20 ms like a typist, so that nothing
 outruns the receive FIFO; "monitor COMMAND" sends a QEMU monitor (HMP)
 command, e.g. "monitor drive_del d3", through the unix socket named by
-$ARM_VM_MONITOR (bin/arm-vm passes it to QEMU's -monitor).  Blank lines
+$ARM_VM_MONITOR (bin/arm-vm passes it to QEMU's -monitor); "host COMMAND"
+runs a shell command on the host (output shown, limited to -w seconds)
+and fails the script unless it exits 0.  Blank lines
 and lines starting with # are skipped.  Exits 0 when every expect
 matched; on a timeout or when QEMU exits early, prints which line failed
 and exits 1.  QEMU is stopped at the end either way.  The console is
@@ -84,7 +86,7 @@ def main():
                 arg = arg.encode().decode('unicode_escape').encode('latin-1')
             elif op == 'monitor' and not os.environ.get('ARM_VM_MONITOR'):
                 sys.exit('vmexpect: monitor needs ARM_VM_MONITOR')
-            elif op not in ('expect', 'monitor'):
+            elif op not in ('expect', 'monitor', 'host'):
                 sys.exit('vmexpect: bad line: %s' % ln)
             steps.append((op, arg))
 
@@ -105,6 +107,19 @@ def main():
                 continue
             if op == 'monitor':
                 hmp(os.environ['ARM_VM_MONITOR'], arg)
+                continue
+            if op == 'host':
+                print('\nvmexpect: host: %s' % arg, flush=True)
+                try:
+                    r = subprocess.run(arg, shell=True, timeout=wait)
+                except subprocess.TimeoutExpired:
+                    print('vmexpect: host command timed out (step %d)'
+                          % (i + 1))
+                    return 1
+                if r.returncode != 0:
+                    print('vmexpect: host command exited %d (step %d)'
+                          % (r.returncode, i + 1))
+                    return 1
                 continue
             want = arg.encode()
             end = time.time() + wait
