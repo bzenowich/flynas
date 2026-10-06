@@ -9,7 +9,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send dmesg | grep -c 'GICv2m at' | sed 's/^/V''2M /'\r

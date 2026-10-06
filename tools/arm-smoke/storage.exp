@@ -7,7 +7,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send ls /dev/da0 /dev/da8 | wc -l | sed 's/^ */D''EVS /'\r

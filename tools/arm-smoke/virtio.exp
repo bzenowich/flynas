@@ -4,7 +4,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send mount | grep -c '^/dev/vbd0 on / (ufs, local)' | sed 's/^/MO''UNT /'\r

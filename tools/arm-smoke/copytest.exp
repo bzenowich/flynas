@@ -4,7 +4,7 @@
 # UFS root and once on tmpfs.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send /root/copytest /root/ct.dat | sed 's/^/R''1 /'\r

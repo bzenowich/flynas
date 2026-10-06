@@ -4,7 +4,7 @@
 # only "rc=0" counts as a pass.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send ls /dev/vbd1 /dev/vbd2 /dev/vbd3 /dev/vbd4 | wc -l | sed 's/^ */D''ISKS /'\r

@@ -7,7 +7,7 @@
 # that is behind /var/db/savetime forward to it.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send date -u 202401020304 >/dev/null; echo "SE""T ok"\r
@@ -15,7 +15,7 @@ expect SET ok
 send reboot\r
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send date -u +%Y | sed 's/^/YE''AR /'\r

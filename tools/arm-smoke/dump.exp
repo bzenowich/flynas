@@ -1,0 +1,42 @@
+# vmexpect.py script for run-storage.sh EXP=dump.exp, with DUMPSIZE=512m
+# ROOTSIZE=800m ARM_VM_REBOOT=1 (and -- -s 2): a kernel crash dump.  The
+# panic stops in ddb; continuing it writes a minidump to vbd1 and
+# reboots.  savecore then copies the dump out, and dmesg and ps read it
+# through libkvm (kvm_aarch64.c walks the dumped translation tables):
+# the message buffer must hold the panic, the process list the sysctl
+# that panicked.  Markers are split in the commands so the echoed
+# command lines cannot match.
+expect login:
+send root\r
+expect ~ #
+send exec /bin/sh\r
+expect #
+send sysctl -n kern.bootfile\r
+expect /boot/kernel/kernel
+expect #
+send dumpon /dev/vbd1 && echo DUMP""ON\r
+expect DUMPON
+expect #
+send sysctl debug.panic=1\r
+expect db>
+send c\r
+expect Dumping
+expect Dump complete
+expect login:
+send root\r
+expect ~ #
+send exec /bin/sh\r
+expect #
+send savecore -v /var/crash /dev/vbd1 && echo SAVE""CORE\r
+expect SAVECORE
+expect #
+send ls -l /var/crash\r
+expect kern.0
+expect vmcore.0
+expect #
+send echo N=$(dmesg -M /var/crash/vmcore.0 -N /var/crash/kern.0 | grep -c 'panic: sysctl_debug_pani[c]')\r
+expect N=1
+expect #
+send ps -M /var/crash/vmcore.0 -N /var/crash/kern.0 -ax -o pid,comm | grep -w sysct[l] && echo P""S\r
+expect PS
+expect #

@@ -12,7 +12,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send newfs_hammer2 -L T /dev/da8 >/dev/null 2>&1 && echo "NE""WFS ok"\r

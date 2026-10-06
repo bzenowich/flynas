@@ -11,7 +11,7 @@ expect issuing COARSE offset adjustment
 expect Starting syslogd
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send date -u +%Y | sed 's/^/YE''AR /'\r

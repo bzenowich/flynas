@@ -6,7 +6,7 @@
 # echoed command lines cannot match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send id operator | sed 's/^/I''D /'\r

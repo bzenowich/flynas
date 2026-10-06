@@ -12,7 +12,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send dmesg | grep -c 'intrc_test: parent irq 150 on cpu0, inputs 0-2 irqs 191 190 189' | sed 's/^/REG''ISTERED /'\r

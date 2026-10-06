@@ -9,7 +9,7 @@
 # split in the commands so the echoed command lines cannot match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send sysctl debug.enter_debugger=ddb\r

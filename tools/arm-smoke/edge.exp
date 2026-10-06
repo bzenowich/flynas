@@ -15,7 +15,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send sysctl -n hw.busdma.bounce_edge hw.busdma.dma_align | paste -s -d' ' - | sed 's/^/AL''IGN /'\r

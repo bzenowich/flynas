@@ -14,7 +14,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send cd /root/hammer2-tests/v3 && . ./common.sh && (kldstat -q -m hammer2 || kldload hammer2); setup_fresh && check_v3 && echo "SET""UP ok"\r

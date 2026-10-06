@@ -11,7 +11,7 @@
 # match.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send dmesg | grep -E 'FDTRES|syscon'\r

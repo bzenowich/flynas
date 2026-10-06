@@ -11,7 +11,7 @@
 # ahci 21, xhci 22 -> cpus 0, 1, 2.
 expect login:
 send root\r
-expect #
+expect ~ #
 send exec /bin/sh\r
 expect #
 send dd if=/dev/zero of=/dev/da0 bs=64k count=512 2>/dev/null; dd if=/dev/da0 of=/dev/null bs=64k count=512 2>/dev/null; echo "D""A0 ok"\r
