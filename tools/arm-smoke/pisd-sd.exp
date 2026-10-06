@@ -1,0 +1,34 @@
+# vmexpect.py script for run-pisd.sh, step 1: arm-pisd's image as vbd0.
+expect login:
+send root\r
+expect ~ #
+send exec /bin/sh\r
+expect #
+send mount | grep -c '^/dev/vbd0s2 on / (ufs, local)' | sed 's/^/MO''UNT /'\r
+expect MOUNT 1
+send fsck_msdosfs -n /dev/vbd0s1 > /tmp/fsck.out 2>&1 && echo "FS""CK ok"; cat /tmp/fsck.out\r
+expect FSCK ok
+send mount /boot/firmware && echo "FW""MNT ok"\r
+expect FWMNT ok
+send ls /boot/firmware /boot/firmware/overlays | tr '\n' ' ' | sed 's/^/LS/'; echo\r
+expect bcm2711-rpi-4-b.dtb
+send ls /boot/firmware | grep -c -x -e config.txt -e cmdline.txt -e kernel8.img -e start4.elf -e fixup4.dat -e root-md.img -e bcm2711-rpi-4-b.dtb -e rootmode.txt | sed 's/^/NA''MES /'\r
+expect NAMES 8
+send test -f /boot/firmware/overlays/disable-bt.dtbo && echo "OVE""RLAY ok"\r
+expect OVERLAY ok
+send sha256 -q /boot/firmware/kernel8.img | sed 's/^/KS''UM /'\r
+expect KSUM @KSUM@
+send sha256 -q /boot/firmware/root-md.img | sed 's/^/MS''UM /'\r
+expect MSUM @MSUM@
+send cat /boot/firmware/cmdline.txt /boot/firmware/rootmode.txt | tr '\n' ' ' | sed 's/^/CM''D /'; echo\r
+expect CMD vfs.root.mountfrom=ufs:vbd0s2 # root on SD
+send ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f2 | sed 's/^/HO''STKEY /'\r
+expect HOSTKEY @HFP@
+send grep -c -e 'ifconfig_genet0="DHCP"' -e 'sshd_enable="YES"' /etc/rc.conf | sed 's/^/RC''CONF /'\r
+expect RCCONF 2
+send pgrep -x sshd > /dev/null && echo "SSH""D up"\r
+expect SSHD up
+send umount /boot/firmware && echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

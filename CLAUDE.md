@@ -52,6 +52,7 @@ Use these instead of ad-hoc ssh/scp:
 | `bin/arm-installworld ROOT` | arm64 port: installworld + `etc distribution` into an image root; owners/modes go to `ROOT.metalog` |
 | `bin/arm-mkimg [-s SIZE] ROOT IMAGE` | arm64 port: root-owned UFS image of ROOT (makefs + mtree spec from `BSD.*.dist` and the metalog); boot with `bin/arm-vm -r IMAGE -a vfs.root.mountfrom=ufs:md0` |
 | `bin/arm-x86build {sync\|build\|quick\|install\|boottest}` | arm64 port: build the fork as x86_64 in h2dev (`-j2`) and boot-test it once, to prove MI changes don't break x86 |
+| `bin/arm-pisd [-n] [-k PUBKEY] [-r md\|sd] [-D DEV] [-s SIZE] [WORK]` | arm64 port: Raspberry Pi 4 SD image (`WORK/flynas-pi4.img`, default `tools/pisd`): FAT32 boot slice with firmware + `kernel8.img` (ARM64_RPI4) + md root, UFS root slice; DHCP on genet0 + sshd. Tested under QEMU by `tools/arm-smoke/run-pisd.sh` |
 
 `bin/deploy` defaults to `service flynas reload`. Use `--restart` when
 `init.lua`, `schema.sql`, a recipe, or `nginx.conf` changed — `init_by_lua`

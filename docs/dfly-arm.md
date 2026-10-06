@@ -30,8 +30,9 @@ Progress 5g: DMA windows and bouncing, interrupt spreading, faster copy
 routines, async parity writes, pulled-disk handling, RTC write-back, and
 dntpd setting the clock at boot. The watchdog and RNG drivers are
 written. The Phase 6 drivers (mailbox, PCIe, GENET + PHY, EMMC2,
-thermal) are written and compile-tested (Progress 6a). Next: boot on
-the board.
+thermal) are written and compile-tested (Progress 6a). `bin/arm-pisd`
+makes the SD image, and DHCP + sshd management is tested (Progress 6b).
+Next: boot on the board.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1919,6 +1920,66 @@ New kernel config `ARM64_RPI4`; `ARM64_VIRT` is unchanged.
   - The result is `hw.sensors.bcmtemp0.temp0`.
 - The x86 check of the MI changes (mii, brgphy, mmc) passed: quickkernel
   `X86_64_GENERIC` rebuilt all three with no warnings.
+
+**Progress 6b (2026-10-06): remote management, the boot path and the
+SD image** (fork 43e16b689c):
+- **Remote management** (`run-netmgmt.sh`, 11/11):
+  - The image boots with `ifconfig_vtnet0="DHCP"` and `sshd_enable` in
+    `rc.conf`. Nothing is typed on the console.
+  - The host logs in over the NIC (QEMU hostfwd) and checks the lease,
+    the default route, `resolv.conf` and sshd on `*:22` (v4 and v6).
+  - It then reboots over ssh. DHCP and sshd come back with the first
+    boot's host key.
+  - `vmexpect.py` gained a `host` step.
+- **Console fallback** (`fdt_early.c`):
+  - If `stdout-path` is missing or names something other than a PL011,
+    the console is the first enabled `arm,pl011`.
+  - The firmware's own `bcm2711-rpi-4-b.dtb` points `serial0` at the
+    mini-UART. `disable-bt` moves it to the PL011 (`serial@7e201000`),
+    so the fallback is a backstop.
+- **Bootargs:**
+  - The firmware prepends Linux words (`coherent_pool=`,
+    `8250.nr_uarts=`, …) to `cmdline.txt`, so `boot_env` grew from 1 KB
+    to 4 KB.
+  - Words that still don't fit are counted and reported at boot instead
+    of being dropped silently.
+  - Checked by `run-console.sh` (10/10): the stdout-path is the PL061,
+    and about 2 KB of filler words come before `vfs.root.mountfrom`.
+- **SD image: `bin/arm-pisd`.**
+  - MBR layout:
+    - slice 1 is FAT32 `BOOT` (512 MB): firmware `PIFW_TAG` (cached in
+      `tools/pifw`), `kernel8.img`, `config.txt`, `cmdline.txt` and
+      `root-md.img`;
+    - slice 2 is a bare UFS root (type 0x83, no disklabel; 0xA5 makes
+      DragonFly log "cannot find label" on every open).
+  - `config.txt`:
+    - sets `kernel_address=0x200000`, `enable_uart`,
+      `uart_2ndstage` and `dtoverlay=disable-bt`;
+    - pulls in `include rootmode.txt`, which picks the md root (the
+      firmware's `initramfs root-md.img followkernel`) or the SD root;
+    - `README.txt` on the card says how to switch.
+  - `rc.conf`: DHCP on `genet0`, sshd, dntpd and savetime.
+  - SSH: the root key comes from `-k`, or a generated
+    `WORK/id_ed25519`. Host keys are made on the host, so they stay the
+    same across md boots.
+  - The host has no mtools and the proxy blocks the Ubuntu archive, so
+    `bin/fatput.py` fills a `mkfs.fat` image instead:
+    - short names with NT lower-case flags, or VFAT long names with
+      `~N` aliases;
+    - contiguous files;
+    - the `55 AA` trail on the sector after FSInfo, which BSD
+      `fsck_msdosfs` wants.
+  - `options MSDOSFS` added to `ARM64_RPI4` and `ARM64_VIRT`, for
+    `/boot/firmware`.
+- **`run-pisd.sh`** (33/33, then 13/13): QEMU boots the image (ARM64_VIRT
+  kernel, `-D vbd0`) with root on `vbd0s2`. It checks:
+  - `fsck_msdosfs`, mounting `/boot/firmware`, and the file names;
+  - the checksums of `kernel8.img` and `root-md.img`;
+  - `cmdline.txt`/`rootmode.txt`, the host key, `rc.conf` and sshd.
+  - It then boots `root-md.img` as the md root.
+- **Not testable here:** the Pi firmware's handling of the image:
+  - `include`, `initramfs`, and the load address;
+  - whether it reads our FAT.
 
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,

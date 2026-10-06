@@ -1,0 +1,199 @@
+#!/bin/sh
+# arm64 port: build a Raspberry Pi 4 SD-card image (MBR):
+#   slice 1  FAT32 boot (BOOT): Pi firmware, kernel8.img, config.txt,
+#            cmdline.txt, and root-md.img (the md root for first light)
+#   slice 2  UFS root (bare slice, no disklabel), the same world with
+#            fstab on ${DEV}s2
+#
+#   bin/arm-pisd [-n] [-k PUBKEY] [-r md|sd] [-D DEV] [-s ROOTSIZE] [WORK]
+#   -n  reuse WORK/root from an earlier run (skip installworld)
+#   -k  ssh public key for root (default: generate WORK/id_ed25519)
+#   -r  which root config.txt/cmdline.txt boot (default md: the root
+#       comes from root-md.img in RAM, so a broken SD driver still
+#       boots; sd mounts slice 2).  README.txt on the card says how to
+#       switch.
+#   -D  root disk device name in fstab and cmdline (default mmcsd0;
+#       vbd0 for the QEMU test, run-pisd.sh)
+#   -s  size of the UFS root slice (default 2g; growfs later)
+# WORK defaults to tools/pisd.  Output: WORK/flynas-pi4.img, to write
+# with   dd if=WORK/flynas-pi4.img of=/dev/sdX bs=4M conv=fsync
+#
+# Firmware comes from github.com/raspberrypi/firmware at PIFW_TAG, cached
+# in tools/pifw/TAG.  The kernel is tools/kobj/ARM64_RPI4/kernel.bin.
+# rc.conf: DHCP on genet0, sshd, dntpd, savetime.  ssh host keys are made
+# here, so they stay the same across md-root boots and both roots.
+. "$(dirname "$0")/_common.sh"
+set -e
+
+PIFW_TAG=${PIFW_TAG:-1.20260915}
+reuse=0 key= rootmode=md dev=mmcsd0 rootsize=2g
+while getopts nk:r:D:s: o; do
+    case $o in
+    n) reuse=1 ;;
+    k) key=$OPTARG ;;
+    r) rootmode=$OPTARG ;;
+    D) dev=$OPTARG ;;
+    s) rootsize=$OPTARG ;;
+    *) sed -n '2,/^$/s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+case $rootmode in md|sd) ;; *) echo "arm-pisd: -r md or sd" >&2; exit 2 ;; esac
+[ -z "$key" ] || [ -f "$key" ] || { echo "arm-pisd: no key $key" >&2; exit 1; }
+W=${1:-$REPO/tools/pisd}
+K=$REPO/tools/kobj/ARM64_RPI4/kernel.bin
+[ -f "$K" ] || { echo "arm-pisd: no $K (bin/arm-kbuild ARM64_RPI4 depend all -j2)" >&2; exit 1; }
+MKFS_FAT=$(command -v mkfs.fat || echo /sbin/mkfs.fat)
+[ -x "$MKFS_FAT" ] || { echo "arm-pisd: needs mkfs.fat (dosfstools)" >&2; exit 1; }
+
+mkdir -p "$W"
+W=$(cd "$W" && pwd)
+R="$W/root"
+
+# --- Firmware ------------------------------------------------------------
+FW="$REPO/tools/pifw/$PIFW_TAG"
+url=https://raw.githubusercontent.com/raspberrypi/firmware/$PIFW_TAG/boot
+for f in start4.elf fixup4.dat bcm2711-rpi-4-b.dtb overlays/disable-bt.dtbo \
+    LICENCE.broadcom; do
+    [ -s "$FW/$f" ] && continue
+    mkdir -p "$(dirname "$FW/$f")"
+    echo "==> fetch $f ($PIFW_TAG)"
+    curl -fsSL -o "$FW/$f.tmp" "$url/$f"
+    mv "$FW/$f.tmp" "$FW/$f"
+done
+
+# --- Root tree -----------------------------------------------------------
+[ $reuse = 1 ] && [ -d "$R/etc" ] || "$REPO/bin/arm-installworld" "$R"
+
+cat > "$R/etc/rc.conf" <<EOI
+hostname="flynas"
+ifconfig_genet0="DHCP"
+sshd_enable="YES"
+dntpd_enable="YES"
+savetime_enable="YES"
+EOI
+
+if [ -z "$key" ]; then
+    [ -f "$W/id_ed25519" ] ||
+        ssh-keygen -q -t ed25519 -N '' -C root@flynas -f "$W/id_ed25519"
+    key="$W/id_ed25519.pub"
+fi
+mkdir -p "$R/root/.ssh" "$R/boot/firmware"
+cp "$key" "$R/root/.ssh/authorized_keys"
+for t in ed25519 ecdsa rsa; do
+    [ -f "$W/hostkeys/ssh_host_${t}_key" ] && continue
+    mkdir -p "$W/hostkeys"
+    ssh-keygen -q -t $t -N '' -C root@flynas -f "$W/hostkeys/ssh_host_${t}_key"
+done
+cp "$W"/hostkeys/ssh_host_* "$R/etc/ssh/"
+{
+    echo "$R/root/.ssh root wheel 700"
+    echo "$R/root/.ssh/authorized_keys root wheel 600"
+    echo "$R/boot/firmware root wheel 755"
+    for t in ed25519 ecdsa rsa; do
+        echo "$R/etc/ssh/ssh_host_${t}_key root wheel 600"
+        echo "$R/etc/ssh/ssh_host_${t}_key.pub root wheel 644"
+    done
+} >> "$R.metalog"
+
+# Two images of the same tree; only the fstab differs.
+fstab() {
+    printf '%s\t/\t\tufs\trw\t1\t1\n' "$1"
+    printf '/dev/%ss1\t/boot/firmware\tmsdos\trw,noauto\t0\t0\n' "$dev"
+}
+fstab /dev/md0 > "$R/etc/fstab"
+"$REPO/bin/arm-mkimg" -s 300m "$R" "$W/root-md.img"
+fstab "/dev/${dev}s2" > "$R/etc/fstab"
+"$REPO/bin/arm-mkimg" -s "$rootsize" "$R" "$W/root-sd.img"
+
+# --- Boot slice ----------------------------------------------------------
+B="$W/boot"
+rm -rf "$B"
+mkdir -p "$B/overlays"
+cp "$FW/start4.elf" "$FW/fixup4.dat" "$FW/bcm2711-rpi-4-b.dtb" \
+    "$FW/LICENCE.broadcom" "$B/"
+cp "$FW/overlays/disable-bt.dtbo" "$B/overlays/"
+cp "$K" "$B/kernel8.img"
+cp "$W/root-md.img" "$B/root-md.img"
+cat > "$B/config.txt" <<'EOI'
+# DragonFly BSD / FlyNAS on a Raspberry Pi 4 (bin/arm-pisd)
+arm_64bit=1
+kernel=kernel8.img
+kernel_address=0x200000
+# PL011 console on GPIO14/15 (header pins 8/10), 115200 8N1; the
+# firmware's own boot messages go there too.
+enable_uart=1
+uart_2ndstage=1
+dtoverlay=disable-bt
+disable_splash=1
+# md root (root-md.img in RAM) or SD root: see README.txt.
+include rootmode.txt
+EOI
+printf 'initramfs root-md.img followkernel\n' > "$B/rootmode-md.txt"
+printf '# root on SD slice 2: no initramfs\n' > "$B/rootmode-sd.txt"
+printf 'vfs.root.mountfrom=ufs:md0\n' > "$B/cmdline-md.txt"
+printf 'vfs.root.mountfrom=ufs:%ss2\n' "$dev" > "$B/cmdline-sd.txt"
+cp "$B/rootmode-$rootmode.txt" "$B/rootmode.txt"
+cp "$B/cmdline-$rootmode.txt" "$B/cmdline.txt"
+cat > "$B/README.txt" <<EOI
+DragonFly BSD / FlyNAS boot partition (bin/arm-pisd, firmware $PIFW_TAG)
+
+Root file system: config.txt includes rootmode.txt; cmdline.txt holds
+the kernel's arguments.  Two ready-made pairs:
+  md root (RAM, from root-md.img; changes are lost at reboot):
+      copy rootmode-md.txt to rootmode.txt, cmdline-md.txt to cmdline.txt
+  SD root (slice 2, /dev/${dev}s2):
+      copy rootmode-sd.txt to rootmode.txt, cmdline-sd.txt to cmdline.txt
+This card was made with the $rootmode root selected.
+
+Console: 3.3 V USB-TTL adapter, GND pin 6, adapter RX to pin 8 (GPIO14),
+adapter TX to pin 10 (GPIO15), 115200 8N1.  Never RS232 levels.
+Kernel options go in cmdline.txt: -s single user, -v verbose.
+Network: DHCP on genet0; ssh root@<lease> with the key given to arm-pisd.
+EOI
+
+# FAT32 needs at least 65525 clusters: 4 KB clusters, 512 MB.
+FATMB=512
+rm -f "$W/boot.img"
+truncate -s ${FATMB}M "$W/boot.img"
+"$MKFS_FAT" -F 32 -S 512 -s 8 -n BOOT "$W/boot.img" > /dev/null
+python3 "$REPO/bin/fatput.py" "$W/boot.img" "$B" BOOT
+
+# --- Disk: MBR, boot at 1 MB, root after it ------------------------------
+python3 - "$W/flynas-pi4.img" "$W/boot.img" "$W/root-sd.img" <<'EOF'
+import os, struct, sys
+out, boot, root = sys.argv[1:]
+SEC = 512
+b0 = 2048
+bn = os.path.getsize(boot) // SEC
+r0 = b0 + bn
+r0 = (r0 + 2047) // 2048 * 2048
+rn = os.path.getsize(root) // SEC
+def ent(typ, start, n):
+    return struct.pack('<B3sB3sII', 0, b'\xfe\xff\xff', typ, b'\xfe\xff\xff',
+                       start, n)
+mbr = bytearray(SEC)
+mbr[440:444] = os.urandom(4)
+mbr[446:462] = ent(0x0C, b0, bn)		# FAT32 LBA
+# A bare UFS slice (no disklabel): not 0xA5/0x6C, which make DragonFly
+# look for a label and log "cannot find label" on every open.
+mbr[462:478] = ent(0x83, r0, rn)
+mbr[510:512] = b'\x55\xaa'
+with open(out, 'wb') as f:
+    f.write(mbr)
+    for src, start in ((boot, b0), (root, r0)):
+        f.seek(start * SEC)
+        with open(src, 'rb') as s:
+            while True:
+                buf = s.read(1 << 22)
+                if not buf:
+                    break
+                f.write(buf)
+    f.truncate((r0 + rn) * SEC)
+print('arm-pisd: %s: boot %d MB at 1 MB, root %d MB at %d MB'
+      % (out, bn * SEC >> 20, rn * SEC >> 20, r0 * SEC >> 20))
+EOF
+rm -f "$W/boot.img" "$W/root-sd.img"
+echo "arm-pisd: root key: $key"
+[ "$key" = "$W/id_ed25519.pub" ] && echo "arm-pisd: private key: $W/id_ed25519"
+echo "arm-pisd: write: dd if=$W/flynas-pi4.img of=/dev/sdX bs=4M conv=fsync"

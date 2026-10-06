@@ -1,0 +1,15 @@
+# vmexpect.py script for the console fallback and long bootargs (see
+# run-console.sh): stdout-path names the PL061 GPIO block, not a UART,
+# so any console output at all means the first-PL011 fallback worked;
+# the bootargs carry ~2 KB of Pi-firmware-style words in front of
+# vfs.root.mountfrom, which must still reach the kernel.
+expect aarch64: entered at EL
+expect login:
+send root\r
+expect ~ #
+send dmesg | grep -c 'words dropped' | sed 's/^/DRO''P /'\r
+expect DROP 0
+send kenv pad49 | sed 's/^/PA''D /'\r
+expect PAD x49
+send shutdown -p now\r
+expect Uptime:
