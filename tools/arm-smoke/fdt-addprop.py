@@ -4,6 +4,9 @@
     fdt-addprop.py IN.dtb OUT.dtb /node/path prop-name CELL...
 
 CELLs are 32-bit integers (0x... accepted); none gives an empty property.
+A CELL of the form s:TEXT is a NUL-terminated string instead (several
+make a string list, e.g. compatible or clock-names).  If the node does
+not exist but its parent does, it is created.
 For testing without dtc, e.g. giving QEMU virt's PCIe host bridge a
 dma-ranges (tools/arm-smoke/bounce.exp):
 
@@ -25,8 +28,11 @@ def main():
     if len(sys.argv) < 5:
         sys.exit(__doc__)
     src, dst, path, pname = sys.argv[1:5]
-    value = b"".join(struct.pack(">I", int(c, 0) & 0xFFFFFFFF)
+    value = b"".join(c[2:].encode() + b"\0" if c.startswith("s:") else
+                     struct.pack(">I", int(c, 0) & 0xFFFFFFFF)
                      for c in sys.argv[5:])
+    parent, _, newname = path.rpartition("/")
+    parent = parent or "/"
     blob = open(src, "rb").read()
     (magic, _total, off_struct, off_strings, off_rsv, version, last_comp,
      boot_cpu, size_strings, size_struct) = struct.unpack(">10I", blob[:40])
@@ -77,6 +83,13 @@ def main():
         elif tok == END_NODE:
             if skip_prop_in == len(stack):
                 skip_prop_in = None
+            cur = "/" + "/".join(n for n in stack[1:] if n)
+            if not found and cur == parent:
+                name = newname.encode() + b"\0"
+                out += struct.pack(">I", BEGIN_NODE) + name + \
+                    b"\0" * (pad4(len(name)) - len(name))
+                out += newprop + struct.pack(">I", END_NODE)
+                found = True
             stack.pop()
             out += blob[pos:pos + 4]
             pos += 4

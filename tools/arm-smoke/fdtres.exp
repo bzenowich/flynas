@@ -1,0 +1,34 @@
+# vmexpect.py script for run-storage.sh EXP=fdtres.exp
+# DTB=res.dtb (mk-res-dtb.sh) KENV=debug.fdtres_test=1 (Phase 6
+# blocker: device tree clocks, resets, regulators and syscons).
+# fdt_res_test.c resolves /fdtres-test's clocks (24 MHz fixed, 16 MHz
+# fixed-factor), its reset (a test provider, id 7), a fixed 3.3 V
+# supply, a GPIO-switched supply (unusable without a GPIO framework)
+# and a syscon over the pl061, served by the generic syscon driver.
+# Each of the 24 checks prints "FDTRES name value" (" BAD" on a
+# mismatch), then "FDTRES bad N".
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send dmesg | grep -E 'FDTRES|syscon'\r
+expect #
+send dmesg | grep -c '^syscon0: <System controller registers> .*on ofwbus0' | sed 's/^/ATT''ACHED /'\r
+expect ATTACHED 1
+send dmesg | grep -c '^FDTRES [a-z_0-9]* -*[0-9]*$' | sed 's/^/CHE''CKS /'\r
+expect CHECKS 25
+send dmesg | grep -c 'FDTRES.* BAD' | sed 's/^/MIS''MATCHES /'\r
+expect MISMATCHES 0
+send dmesg | grep '^FDTRES bad' | sed 's/^FDTRES/RES''ULT/'\r
+expect RESULT bad 0
+send dmesg | grep -E '^FDTRES (apb|scaled)_hz' | awk '{print $3}' | paste -s -d' ' - | sed 's/^/H''Z /'\r
+expect HZ 24000000 16000000
+send dmesg | grep -E '^FDTRES (vmmc_uv|syscon_id0|rst_id)' | awk '{print $3}' | paste -s -d' ' - | sed 's/^/VAL''UES /'\r
+expect VALUES 7 3300000 97
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

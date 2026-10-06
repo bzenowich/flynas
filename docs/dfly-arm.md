@@ -1311,7 +1311,8 @@ with `sshd`.
     mbox and clocks.
 - **Interrupt-parent / `interrupts-extended` resolution (§3.3)** and
   `dma-ranges` parsing feeding busdma tags (§3.5).
-- **Minimal `dev/clk` / regulator / hwreset / syscon:** only what EMMC2 and
+- **Minimal `dev/clk` / regulator / hwreset / syscon** (done 2026-10-05,
+  `bus/fdt/fdt_res.c`): only what EMMC2 and
   GENET actually reference. FreeBSD `clk.c` is 1.7K lines; consider a stub
   that answers fixed rates from the firmware mailbox instead.
 - **Generic drivers:**
@@ -1646,8 +1647,15 @@ planned or found along the way and are not done. Code-level items were
 checked against the fork at `1bc64454c4`.
 
 **Blocks Phase 6:**
-- Minimal clk / regulator / hwreset / syscon (Phase 5). Nothing exists yet,
-  and EMMC2 and GENET reference them.
+- ~~Minimal clk / regulator / hwreset / syscon (Phase 5).~~ Done
+  2026-10-05 (`95b5a62304`, `bus/fdt/fdt_res.c`, `fdt_syscon.c`):
+  providers register under their phandle; consumers resolve
+  `clocks`/`clock-names`, `resets`/`reset-names`, `*-supply` and syscon
+  phandles. Built in: `fixed-clock`, `fixed-factor-clock`,
+  `regulator-fixed` (a GPIO-switched one only if always-on/boot-on), and
+  a generic `syscon` driver. No clock tree or rate propagation; the Pi's
+  firmware clock provider (mailbox) is Phase 6 work. `fdtres.exp` (DTB
+  from `mk-res-dtb.sh`, `debug.fdtres_test=1`) passes 24/24 checks.
 - MSI and a second-interrupt-controller layer (Phase 5). The MSI half
   is done for GICv2m (2026-10-05, `b949b806bd`): the generic ECAM bridge
   passes MSI/MSI-X to `gic.c`, virtio-blk-pci takes one MSI-X vector per

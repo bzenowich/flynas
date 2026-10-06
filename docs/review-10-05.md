@@ -184,7 +184,7 @@ FreeBSD `critical_enter`.
 | ABI marked "PROVISIONAL" | 4 | open | `cpu/aarch64/include/ucontext.h:41`, `tls.h:45` | Med before release |
 | No native compiler on the target; the clang patch was only tested at driver level. Phase 8 plan (a) depends on it | 4 | partial | dfly-arm.md ~l.1114-1127 | **High** for Phase 8 |
 | PL011 is still the `early_uart.c` tty, not a `dev/serial` driver | 5 | untracked | `fdt_early.c:153` | Low |
-| No minimal clk/regulator/hwreset/syscon | 5 | missing, untracked | — | High for Phase 6 |
+| No minimal clk/regulator/hwreset/syscon | 5 | done 2026-10-05 (§7) | `bus/fdt/fdt_res.c` | High for Phase 6 |
 | MSI: `gic_msi_*` return EOPNOTSUPP; GICv2m is not wired; no second-interrupt-controller layer (nexus treats any 3-cell controller as the GIC) | 5 | missing | `gic.c:223-250`; `nexus.c:436-460` | High (brcmstb MSI) |
 | Phase 5 exit test ran RAID6 only on virtio, never on umass/xhci | 5 | weaker | — | Med |
 | `dfly-arm.md` is stale: says 65/65; doesn't record `9e9f1a4a9a` (pmap wiring) or `d9ccd244ad` (vtblk). The 156 hammer2 "CHECK FAIL" lines in the pci run were not compared with an mmio run | 5 | untracked | dfly-arm.md ~l.22, ~l.1484, ~l.1858 | Med (records) |
@@ -302,6 +302,7 @@ Progress 5f and 5g.
 | RTC | PL031 started and written back (`resettodr`); never earlier than the root fs time; `rc.d/savetime`; `dntpd -s` by default, right after NETWORKING | `63d6773139`, `1bc64454c4` | `time.exp` 23/23, `ntp.exp` 20/20 |
 | `dfly-arm.md` stale | Brought up to date (Progress 5f, 5g) | dfly docs | — |
 | O6 | Pieces of a load not aligned to the cache writeback granule (CTR_EL0.CWG, 64 on the A72) bounce on every non-coherent tag; copies go through the DMAP; `hw.busdma.bounce_edge=0` turns it off | `6638e1b964` | `edge.exp` 25/25 (`debug=3`), and with `bounce_edge=0` no edge bounces |
+| clk/regulator/hwreset/syscon | `bus/fdt/fdt_res.c`: phandle-keyed providers, consumer lookups by index and name, counted regulator enables, voltage clamping; built-in fixed-clock, fixed-factor-clock, regulator-fixed; generic `syscon` driver | `95b5a62304` | `fdtres.exp` 24/24 checks (`mk-res-dtb.sh` DTB) |
 
 ### Fixed, not fully tested
 
@@ -332,6 +333,6 @@ Progress 5f and 5g.
 | P6 (`MAXPHYS`) | Still 128 KB | later |
 | P7 | Unchanged | — |
 | Crash dumps, DDB | No dump support, DDB off | Phase 9, or earlier if the Pi needs it |
-| `fpu_kern_enter`, kernel modules, ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver, clk/regulator/syscon | Unchanged (§5) | Phases 6–9 as listed there |
+| `fpu_kern_enter`, kernel modules, ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver | Unchanged (§5) | Phases 6–9 as listed there |
 | Thermal, cpufreq | Not started | Phase 6 housekeeping |
 | Other Phase 6 prerequisites | brcmstb PCIe + VL805, mailbox, EMMC2 FDT attachment, GENET + PHY, GPIO, mini-UART | Phase 6 |
