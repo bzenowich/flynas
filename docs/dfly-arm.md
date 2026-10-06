@@ -557,8 +557,9 @@ to do, at low priority (`nice`, one job).
   - **Stubs.** `stubs.c` holds 131 MD symbols, each of which panics with its name. They are grouped by the
     file that will replace them (pmap, user copy, bus_dma, switch,
     signals/ptrace, SMP, interrupts, RTC, kernel linker, dumps).
-  - **DDB is off in ARM64_VIRT** until `db_interface.c`, `db_trace.c` and `setjmp`
-    exist. `machdep.c` has a non-DDB `Debugger()`, because HAMMER2 calls it
+  - **DDB was off in ARM64_VIRT** until `db_interface.c`, `db_trace.c` and `setjmp`
+    existed (done 2026-10-05, see "Still open from Phases 1–5"). `machdep.c` keeps a non-DDB
+    `Debugger()` for kernels without DDB, because HAMMER2 calls it
     unconditionally.
   - **After a panic.** `boot()` spins in its `for(;;)` because the shutdown handlers
     register in a sysinit after VM init. The VM sits there until the `arm-vm` timeout.
@@ -1676,9 +1677,28 @@ checked against the fork at `1bc64454c4`.
   every command.
 
 **Wanted early on the Pi (debugging):**
-- DDB (Phases 1 and 2). It is off in `ARM64_VIRT` until `db_interface.c`,
-  `db_trace.c` and `setjmp` exist; panics print a frame-pointer backtrace
-  only.
+- ~~DDB (Phases 1 and 2).~~ Done 2026-10-05 (fork `36de9246c1`):
+  `options DDB` and `DDB_TRACE` in `ARM64_VIRT`, so a panic prints a
+  backtrace and drops into ddb.
+  - Breakpoints are `brk #0`; the compiled-in `breakpoint()` is `brk #1`.
+    Single step uses MDSCR_EL1.SS. Faults inside ddb recover through
+    `db_nofault`. The other cpus are stopped while ddb runs.
+  - Traces follow the frame-pointer chain through exception frames to
+    user mode, for the current thread or `trace/t TD`.
+  - `db_disasm.c` is a full A64 integer and system decoder. It matches
+    llvm-objdump-18 on every instruction in the kernel. SIMD/FP, LSE
+    and SVE print as `.word`.
+  - Symbols: with no loader, `conf/mkksyms.sh` appends `.symtab` and
+    `.strtab` to `kernel.bin` after the bss, minus the `$x`/`$d` mapping
+    symbols. initarm hands them to link_elf as an "elf kernel" preload
+    record (MODINFOMD_SSYM/ESYM), so static functions get their names.
+    `kernel.bin` now stores the bss as zeros, growing from 5.6 MB to 14 MB.
+  - Test: `ddb.exp` with `run-storage.sh -- -s 2` passes 53/53. It
+    covers entry, registers, trace, `x/i`, a fault on address 0, `ps`,
+    a breakpoint hit on cpu1, step, delete, continue, and panic → ddb →
+    `reset`.
+  - Tests that panic now stop at a `db>` prompt instead of spinning. Both
+    end at the VM timeout.
 - Crash dumps (Phase 2). `md_dumpsys` reports that dumps are unsupported,
   and libkvm can't read them.
 - PL011 as a proper `dev/serial` driver (Phase 5). Optional: the early
@@ -1849,7 +1869,8 @@ set (A–L in `../hammer2-raid6/docs/bitrot.md`) passes on USB disks.
 - Raise the PCIe DMA window toward 3 GB once we understand the 960 MB
   corruption that FreeBSD reported. Bounce copying is the throughput ceiling
   for USB disks on 4 GB and 8 GB boards.
-- An `ddb` aarch64 disassembler, plus `kgdb` and `minidump` support.
+- ~~An `ddb` aarch64 disassembler~~ (done 2026-10-05), plus `kgdb` and
+  `minidump` support.
 - Upstreaming: offer the MI cleanups and then the port to DragonFly (and
   claim the bounty).
 
@@ -2067,7 +2088,8 @@ DragonFly hardware.
    do the `MACHINE`/ABI naming, MI cleanups, and toolchain choices (an
    external LLVM vs vendoring). **Recommendation:** aim for upstream, and
    send the Phase 0 MI cleanups early to get a read on maintainer appetite.
-6. **Tooling gaps:** no `ddb` disassembler, no `kgdb`. QEMU's gdbstub is our
+6. **Tooling gaps:** no `kgdb` (ddb and its disassembler work since
+   2026-10-05). QEMU's gdbstub is our
    debugger until Phase 9. Real-hardware debugging is serial only (no JTAG
    unless we wire one to the Pi's GPIO JTAG pins with `enable_jtag_gpio=1`,
    which is possible and worth doing in Phase 6).

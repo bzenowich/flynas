@@ -1,0 +1,62 @@
+# vmexpect.py script for run-storage.sh EXP=ddb.exp (with -- -s 2)
+# The kernel debugger on arm64: entry from sysctl debug.enter_debugger,
+# registers, a trace through the syscall exception frame that names a
+# static function (the symbol table mkksyms.sh appends to kernel.bin),
+# the disassembler, recovery from a fault on a bad address, a
+# breakpoint hit on the other cpu, single steps, delete and continue,
+# then a panic: backtrace, ddb, reset.
+# ps pages after 20 lines whatever $lines says; q ends it.  Markers are
+# split in the commands so the echoed command lines cannot match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send sysctl debug.enter_debugger=ddb\r
+expect db>
+send show registers\r
+expect spsr
+expect db>
+send trace\r
+expect sysctl_debug_enter_debugger+
+expect --- from user mode ---
+expect db>
+send x/i Debugger,4\r
+expect stp     x29, x30, [sp, #32]
+expect db>
+send x/gx 0\r
+expect type 12 trap
+expect db>
+send ps\r
+expect --More--
+send q
+expect db>
+send b sys_sync\r
+expect db>
+send c\r
+expect #
+send sync; echo SY""NCED\r
+expect Breakpoint at   sys_sync:
+expect db>
+send trace\r
+expect syscall2+
+expect db>
+send s\r
+expect Stopped at      sys_sync+0x4:
+expect db>
+send s\r
+expect Stopped at      sys_sync+0x8:
+expect db>
+send d sys_sync\r
+expect db>
+send c\r
+expect SYNCED
+expect #
+send sysctl debug.panic=1\r
+expect panic: sysctl_debug_panic
+expect Stopped at      Debugger+
+expect db>
+send trace\r
+expect sysctl_debug_panic+
+expect db>
+send reset\r

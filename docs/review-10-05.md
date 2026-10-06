@@ -174,7 +174,7 @@ FreeBSD `critical_enter`.
 | `sys_sysarch` is a panicking stub, reachable by any user as syscall 165 | 2 | bug **[checked]** | `platform/arm64/aarch64/stubs.c:56`; `kern/syscalls.master:237` | **High** (local DoS) |
 | `cpu_set_iopl`/`cpu_clr_iopl` panic, so opening `/dev/io` as root panics | 2 | bug **[checked]** | `stubs.c:52-53`; `kern/kern_memio.c:193` | Med |
 | `md_dumpsys` panics: setting `dumpdev` turns a panic into a recursive panic. No minidump, and libkvm can't read dumps; Phase 9 lists only minidump and kgdb | 2 | missing **[checked]** | `stubs.c:61` | **High** for a server |
-| DDB is off, so a panic prints only a frame-pointer backtrace. Phase 9 schedules only the disassembler | 1/2 | missing, untracked | `backtrace.c` | High for Pi debugging |
+| ~~DDB is off, so a panic prints only a frame-pointer backtrace. Phase 9 schedules only the disassembler~~ **Done 2026-10-05** (fork `36de9246c1`): DDB, A64 disassembler, embedded symbol table; `ddb.exp` 53/53 | 1/2 | done | `db_interface.c`, `db_trace.c`, `db_disasm.c` | — |
 | `fpu_kern_enter` (promised in Phase 2) does not exist; the kernel is `-mgeneral-regs-only` | 2 | missing | `conf/kern.mk:12` | Med (blocks NEON RAID6) |
 | Kernel modules: `kmod.mk` links aarch64 modules `-Bshareable` (ET_DYN), which `link_elf_obj` rejects. `sys/modules` is not built; only a hand-linked test module was loaded. hammer2 is compiled in | 2 | partial (tracked for Phase 7) | `conf/kmod.mk:205-215` | Med |
 | ptrace: debug registers and `PT_STEP` return EINVAL; no gdb/lldb is built | 2 | partial | `machdep.c:1218`; `procfs_machdep.c:98-106` | Low |
@@ -332,7 +332,7 @@ Progress 5f and 5g.
 | P5 | Per-byte table parity; needs `fpu_kern_enter` | Phase 9 |
 | P6 (`MAXPHYS`) | Still 128 KB | later |
 | P7 | Unchanged | — |
-| Crash dumps, DDB | No dump support, DDB off | Phase 9, or earlier if the Pi needs it |
+| Crash dumps, DDB | DDB done 2026-10-05 (`ddb.exp` 53/53); no dump support yet | Crash dumps in progress |
 | `fpu_kern_enter`, kernel modules, ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver | Unchanged (§5) | Phases 6–9 as listed there |
 | Thermal, cpufreq | Not started | Phase 6 housekeeping |
 | Other Phase 6 prerequisites | brcmstb PCIe + VL805, mailbox, EMMC2 FDT attachment, GENET + PHY, GPIO, mini-UART | Phase 6 |
