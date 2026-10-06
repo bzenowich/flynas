@@ -1553,8 +1553,8 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
     with flushes working (no warnings), then forces umass's
     `UQ_MSC_NO_SYNC_CACHE` with `usbconfig add_dev_quirk_vplh` and
     re-attaches. `da` and hammer2 must warn, and the data must survive a
-    remount. **x86 check of these MI changes is pending** (needs h2dev
-    up on the host).
+    remount. The x86 check of these MI changes passed later, with
+    5g's.
 
 **Progress 5g (2026-10-05): review §6 item 3, the Pi groundwork QEMU can test.**
 - **R5, DMA limits** (fork `ad8d0da4f7`):
@@ -1626,8 +1626,16 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
     closed (fork `c7d8a7f9a2`).
 - **Suite:** the RAID6 suite on the final kernel (`R6BUS=pci -s 2`):
   123 pass, 0 fail, no panics.
-- **x86 check pending** for the MI parts: `random.h`, dntpd, the rc
-  files, and the earlier xhci, da, pipe and lwkt changes.
+- **x86 check passed** (2026-10-05, fork `1bc64454c4`):
+  - `X86_64_GENERIC` with all modules builds with gcc 8 in h2dev and
+    boots. This covers the MI kernel changes of 5f and 5g: `random.h`,
+    xhci, da, pipe and lwkt.
+  - `dntpd` builds with WARNS=6 and `-Werror`. The rc scripts pass
+    `sh -n`, and rcorder puts dntpd right after NETWORKING.
+  - The x86 run of the overlay suite was not repeated; the arm64 suite
+    covers P2/R4.
+  - h2dev's 12.6 GB root filled up during the build. Old crash dumps
+    and `/usr/obj` were deleted to make room.
 
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
@@ -2005,8 +2013,8 @@ DragonFly hardware.
      NIC. 5b–5d are done too (ECAM, busdma, AHCI, xhci + umass), and
      the Phase 5 exit test passed (Progress 5e). The x86 check is
      done, and the rewritten RAID6 suite runs 123/0 (Progress 5f).
-     `review-10-05.md` §6 items 1–3 are done (Progress 5f, 5g). Next:
-     the pending x86 check, then Phase 6 (Pi 4 bring-up). Item 4
+     `review-10-05.md` §6 items 1–3 are done and x86-checked
+     (Progress 5f, 5g). Next: Phase 6 (Pi 4 bring-up). Item 4
      waits for Phase 9.
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
