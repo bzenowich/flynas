@@ -15,6 +15,11 @@ Code reviewed:
 - fork `../dragonfly` at `d9ccd244ad` (branch arm64)
 - RAID6 overlay `../hammer2-raid6` at `506ea3c`
 
+**Status (2026-10-05, evening):** §6 items 1–3 are done, tested and
+x86-checked (fork `e53e96d01f`..`1bc64454c4`, overlay `3c5c48f`..`db7d0f2`).
+Item 4 waits for Phase 9. §7 gives the state of each finding; the tables
+in §1–§5 are kept as found.
+
 Paths are relative to `dragonfly/sys` unless they start with `local_`, which
 means `hammer2-raid6/src/sys/`.
 
@@ -228,13 +233,14 @@ FreeBSD `critical_enter`.
      (`dsb` in `bus_space_barrier`) and O8 (`load_acq`/`store_rel` get
      their `dmb ish`; comment fixed).
    - Update `dfly-arm.md`.
+   - x86 check passed (with item 3's).
 2. ~~**Decision: R1 USB flush policy.**~~ **Done 2026-10-05:** (a) + (c).
    `da` sends SYNCHRONIZE CACHE to umass and sets the quirk only when the
    device rejects it (escape: `kern.cam.da.umass_sync_cache=0`).
    `kern.cam.da.N.sync_cache` shows the state, and the new `DIOCGFLUSHCAP`
    ioctl reports it. HAMMER2 warns at a read-write mount about members that
    cannot flush. Still to check on the Pi: whether the VL715 accepts the
-   command.
+   command. Tested with `flush.exp` (31/31). x86 check passed.
 3. ~~**Early Phase 6:**~~ **Done 2026-10-05** (`dfly-arm.md` Progress 5g).
    - R5: `dma-ranges` gives simplebus and the PCIe bridge a windowed tag,
      tags carry a bus offset, and NULL-parent tags get the strictest
@@ -258,8 +264,74 @@ FreeBSD `critical_enter`.
      without an RTC, and `dntpd -s` (now the default) sets the clock
      from pool.ntp.org right after NETWORKING, before the services. It
      was tested against a fake NTP server; the real pool is untested.
+   - Results on arm64 `-smp 2`, final kernel: the RAID6 suite 123/0,
+     `pull.exp` 28/28, `time.exp` 23/23, `ntp.exp` 20/20. The x86 check
+     also passed: `X86_64_GENERIC` with all modules builds and boots in
+     h2dev, and `dntpd` builds with `-Werror`.
 4. **Phase 9:**
    - P5 NEON parity (after `fpu_kern_enter`);
    - S2/S3 finer pmap locking and batched TLBI;
    - S5–S8;
    - DDB and crash dumps if not done earlier.
+
+## 7. Status by finding (2026-10-05)
+
+Commits are in the fork unless marked "overlay" (hammer2-raid6). The
+tests are in `dfly/tools/arm-smoke`. Details are in `dfly-arm.md`
+Progress 5f and 5g.
+
+### Fixed
+
+| # | Fix | Commit | Tested by |
+|---|---|---|---|
+| S1 / P3 | SPI n goes to cpu n % ncpus, and ITARGETSR follows the handler's cpu. `hw.gic.irq_balance` turns it off and `hw.gic.irq.N.cpu` pins one irq | `db037a5749` | `intr.exp` (`-smp 4`: three controllers on three cpus) |
+| O1 | xhci reads the event TRB only after its cycle bit | `6ff70b9e26` | suite, storage |
+| O2 | `dmb oshst` before every `bus_space` write; fences are outer-shareable | `6159fec48b` | suite, storage |
+| O3, O4 | pipe `rindex` and `lwkt_switch_return` fence before the stores that publish | `d9182c584f` | suite |
+| O5, O7, O8 | `dsb` in syncs that do no cache maintenance and in `bus_space_barrier`; `load_acq`/`store_rel` get `dmb ish` | `6159fec48b` | suite, storage |
+| R1 | `da` sends SYNCHRONIZE CACHE to umass and sets the quirk only on rejection; `kern.cam.da.N.sync_cache`, `DIOCGFLUSHCAP`; HAMMER2 warns at mount | `a559cf9187`, overlay `6ede151` | `flush.exp` 31/31 |
+| R2, R3 | The first sync error is kept; failed sync and P/Q/zero-fill writes auto-fail the member; a write error on the resilver target fails the resilver | overlay `3c5c48f` | suite |
+| R4 | The flush fails a member whose delayed writes returned EIO and invalidates its buffers | overlay `db7d0f2` | `pull.exp` 28/28, but see "Fixed, not fully tested" |
+| R5 | `dma-ranges` gives windowed tags (simplebus, PCIe bridge), tags carry a bus offset, NULL-parent tags get the strictest window as `lowaddr`; `MAX_BPAGES` 4096 | `ad8d0da4f7` | `bounce.exp` (tunable and patched DTB) |
+| P1 | 64-byte `ldp`/`stp` `mem*`; 64-byte `ldtr`/`sttr` `copyin`/`copyout` | `7c1650325b` | `copytest.exp` |
+| P2 | P/Q, mirror and zero-column writes start together and are waited for once | overlay `db7d0f2` | suite 123/0 |
+| P6 (bounce pool) | 16 MB per bounce zone (`MAX_BPAGES` 4096) | `ad8d0da4f7` | `bounce.exp` |
+| `sysarch`, iopl | Return `EOPNOTSUPP` instead of panicking | `e53e96d01f` | suite |
+| `md_dumpsys` | Says that dumps are unsupported instead of panicking again (no dump yet) | `e53e96d01f` | — |
+| Reset without PSCI | `cpu_reset_hook`, provided by `bcmwd` | `63d6773139`, `1f260d2c87` | compile only |
+| RTC | PL031 started and written back (`resettodr`); never earlier than the root fs time; `rc.d/savetime`; `dntpd -s` by default, right after NETWORKING | `63d6773139`, `1bc64454c4` | `time.exp` 23/23, `ntp.exp` 20/20 |
+| `dfly-arm.md` stale | Brought up to date (Progress 5f, 5g) | dfly docs | — |
+
+### Fixed, not fully tested
+
+- **R4:** `pull.exp` passes on the old overlay too. The parity writes,
+  checked since R3, already catch the pulled disk, so the async-error scan
+  is a backstop that no test reaches.
+- **R5:** a non-zero bus offset can't be tested on QEMU. Check it with the
+  Pi's PCIe and EMMC2.
+- **R1:** whether the VL715 enclosure accepts SYNCHRONIZE CACHE is still
+  to be checked on the Pi.
+- **Watchdog and entropy:** `bcmwd` (PM watchdog, 15 s maximum, also the
+  reset path) and `bcmrng` (RNG200 as `RAND_SRC_RNG200`) are compile-tested
+  only. QEMU has neither device.
+- **Time:** the real pool.ntp.org and DHCP at boot are untested; the sandbox
+  has no network. The step message appears twice on the console
+  (cosmetic).
+
+### Open
+
+| # | State | When |
+|---|---|---|
+| S2, S3, S5–S8 | Unchanged | Phase 9 |
+| S4, S9, S10 | Unchanged, low priority | — |
+| O6 | Edge cache lines are still cleaned and invalidated at POSTREAD; no cache-line bounce | Phase 6, before GENET RX and umass sense buffers |
+| O9 | Unaudited | Phase 6 drivers |
+| P3 (MSI) | No MSI; needs the brcmstb controller and a second-controller layer | Phase 6 step 4 |
+| P4 | No UAS | later |
+| P5 | Per-byte table parity; needs `fpu_kern_enter` | Phase 9 |
+| P6 (`MAXPHYS`) | Still 128 KB | later |
+| P7 | Unchanged | — |
+| Crash dumps, DDB | No dump support, DDB off | Phase 9, or earlier if the Pi needs it |
+| `fpu_kern_enter`, kernel modules, ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver, clk/regulator/syscon | Unchanged (§5) | Phases 6–9 as listed there |
+| Thermal, cpufreq | Not started | Phase 6 housekeeping |
+| Other Phase 6 prerequisites | brcmstb PCIe + VL805, mailbox, EMMC2 FDT attachment, GENET + PHY, GPIO, mini-UART | Phase 6 |

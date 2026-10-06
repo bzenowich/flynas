@@ -1583,7 +1583,7 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   loops. `copytest.exp` checks every alignment 0–15 against every length
   0–300 plus large ones, `memmove` in both directions, and faults on an
   unmapped page.
-- **P2 and R4, overlay** (hammer2-raid6 `3fd8eb5`):
+- **P2 and R4, overlay** (hammer2-raid6 `db7d0f2`):
   - P/Q, mirror and zero-column writes are started together
     (`hammer2_bwrite_start`) and waited for once.
   - The flush checks each member vnode's write-error count, fails a
