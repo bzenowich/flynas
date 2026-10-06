@@ -326,7 +326,7 @@ Progress 5f and 5g.
 | S2, S3, S5–S8 | Unchanged | Phase 9 |
 | S4, S9, S10 | Unchanged, low priority | — |
 | O9 | Unaudited | Phase 6 drivers |
-| P3 (MSI) | GICv2m MSI/MSI-X done (`b949b806bd`, `msi.exp` 19/19); still needs the brcmstb controller and a second-controller layer for the Pi | Phase 6 step 4 |
+| P3 (MSI) | GICv2m MSI/MSI-X done (`b949b806bd`, `msi.exp` 19/19); second-controller layer done (`65f3c9b141`, `intrc.exp` 23/23); still needs the brcmstb MSI controller | Phase 6 step 4 |
 | P4 | No UAS | later |
 | P5 | Per-byte table parity; needs `fpu_kern_enter` | Phase 9 |
 | P6 (`MAXPHYS`) | Still 128 KB | later |

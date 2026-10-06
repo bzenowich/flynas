@@ -1652,8 +1652,14 @@ checked against the fork at `1bc64454c4`.
   is done for GICv2m (2026-10-05, `b949b806bd`): the generic ECAM bridge
   passes MSI/MSI-X to `gic.c`, virtio-blk-pci takes one MSI-X vector per
   queue and AHCI an MSI (`msi.exp` 19/19; `intr.exp` now sees 4 cpus).
-  Still open: the second-controller layer (nexus maps only the GIC) and
-  brcmstb's own MSI controller behind it; the Pi 4 has no GICv2m.
+  The second-controller layer is done too (`65f3c9b141`,
+  `intr_cascade.c`): inputs of a controller behind one GIC SPI get their
+  own MI irqs from the SPIs the device tree leaves unused, are
+  demultiplexed in `intr_dispatch()`, and can be named as DT interrupt
+  parents. `intrc.exp` (a software controller, `debug.intrc_test=150`)
+  passes 23/23. Not shown by it: that the critical-section fires took
+  the pend-and-replay path. Still open: the brcmstb MSI controller
+  itself (Phase 6 step 4, Pi only).
 - ~~Bouncing of buffers that share cache lines (5c, review O6).~~ Done
   2026-10-05 (`6638e1b964`): every tag on a non-coherent system bounces
   pieces that are not aligned to the cache writeback granule

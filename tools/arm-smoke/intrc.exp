@@ -1,0 +1,35 @@
+# vmexpect.py script for run-storage.sh EXP=intrc.exp
+# KENV=debug.intrc_test=150 (review-10-05 P3, the second interrupt
+# controller layer): intr_cascade_test.c registers a software cascaded
+# controller on irq 150 (SPI INTID 166, unused on QEMU virt) and numbers
+# its inputs 0-2 from the top of the free irqs (191, 190, 189).  Fires
+# 300 inputs, every other one from a critical section on the parent's
+# cpu (pend and replay), through ithread and fast handlers; each must
+# run once, on the parent's cpu.  An input without an irq must be
+# masked as stray.  The disks keep working beside it (GICv2m MSI and
+# INTx).
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send dmesg | grep -c 'intrc_test: parent irq 150 on cpu0, inputs 0-2 irqs 191 190 189' | sed 's/^/REG''ISTERED /'\r
+expect REGISTERED 1
+send sysctl debug.intrc_test_fire=300 >/dev/null && echo "FI""RE ok"\r
+expect FIRE ok
+send sysctl -n debug.intrc_test_count debug.intrc_test_bad | paste -s -d' ' - | sed 's/^/COU''NTS /'\r
+expect COUNTS 300 0
+send sysctl debug.intrc_test_stray=1 >/dev/null && dmesg | grep -c 'stray input 3, masked' | sed 's/^/STR''AY /'\r
+expect STRAY 1
+send vmstat -iv | grep intrc_test\r
+expect #
+send vmstat -iv | awk '$3 == "intrc_test" { n++; if ($2 != "0:") bad++ } END { print "VMS""TAT", n, bad + 0 }'\r
+expect VMSTAT 3 0
+send dd if=/dev/random of=/tmp/p bs=1m count=8 2>/dev/null; dd if=/tmp/p of=/dev/da0 bs=64k 2>/dev/null; dd if=/dev/da0 bs=64k count=128 2>/dev/null | cmp - /tmp/p && echo "D""A0 ok"\r
+expect DA0 ok
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

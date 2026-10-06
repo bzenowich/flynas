@@ -4,6 +4,8 @@
 #   bin/arm-kbuild [KERNCONF] [make targets...]    default: ARM64_VIRT, "depend all"
 #   bin/arm-kbuild ARM64_VIRT -k all               keep going, to list every failure
 #   bin/arm-kbuild --config-only [KERNCONF]        just run config(8)
+#   bin/arm-kbuild -n [KERNCONF] [targets...]      incremental: keep the objects,
+#                                                  no config (same files list)
 #
 # Toolchain: host clang-18 (--target=aarch64-unknown-none-elf, integrated
 # assembler) and dfly/tools/lld ld.lld-18.  Host tools (bmake, config, mkdep)
@@ -15,8 +17,9 @@ SRC="$(cd "${DFLY_SRC:-$REPO/../dragonfly}" && pwd)"
 HOSTBIN="$REPO/tools/host/bin"
 LLD="$REPO/tools/lld/usr/bin/ld.lld-18"
 
-config_only=0
+config_only=0 noconfig=0
 if [ "${1:-}" = "--config-only" ]; then config_only=1; shift; fi
+if [ "${1:-}" = "-n" ]; then noconfig=1; shift; fi
 conf="${1:-ARM64_VIRT}"; [ $# -gt 0 ] && shift
 targets="${*:-depend all}"
 OBJ="$REPO/tools/kobj/$conf"
@@ -43,9 +46,13 @@ for t in nm objcopy objdump size readelf ar strip; do ln -sf "$(command -v llvm-
 chmod +x "$TB/cc"
 export PATH="$TB:$HOSTBIN:$PATH"
 
-echo "==> config $conf -> $OBJ"
-rm -rf "$OBJ"; mkdir -p "$OBJ"
-(cd "$SRC/sys/config" && config -d "$OBJ" "$conf")
+if [ $noconfig -eq 1 ] && [ -f "$OBJ/Makefile" ]; then
+    echo "==> reusing $OBJ"
+else
+    echo "==> config $conf -> $OBJ"
+    rm -rf "$OBJ"; mkdir -p "$OBJ"
+    (cd "$SRC/sys/config" && config -d "$OBJ" "$conf")
+fi
 [ $config_only -eq 1 ] && exit 0
 
 # MACHINE*: the target, not the host.  CCVER names an external compiler
