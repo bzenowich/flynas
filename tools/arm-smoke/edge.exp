@@ -1,0 +1,40 @@
+# vmexpect.py script for run-storage.sh EXP=edge.exp (review-10-05 O6):
+# DMA buffers that share a cache line with other data are bounced.  Same
+# disks as storage.exp, booted with hw.busdma.debug=3, so a bounce page
+# that is not copied back after PREREAD would hand CAM the poison pattern.
+# Checks:
+#   - hw.busdma.dma_align is the CPU's line size (64 on the Cortex-A72),
+#   - CAM's small CCBs (INQUIRY, READ CAPACITY, ...) were edge-bounced,
+#   - camcontrol inquiry on both da disks shows QEMU's strings, and the
+#     32 MB write/read-back of storage.exp still matches,
+#   - the sync audit stays at 0.
+# (umass bounces its CBW and CSW, which live in the softc, on every
+# command.)  QEMU is cache-coherent, so this shows the bounce path is
+# correct, not that the hazard is gone on real hardware.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send sysctl -n hw.busdma.bounce_edge hw.busdma.dma_align | paste -s -d' ' - | sed 's/^/AL''IGN /'\r
+expect ALIGN 1 64
+send [ "$(sysctl -n hw.busdma.edge_bounces)" -gt 0 ] && echo "EDGE"" bounced"\r
+expect EDGE bounced
+send camcontrol inquiry da0 | grep -q QEMU && camcontrol inquiry da8 | grep -q QEMU && echo "INQ""UIRY ok"\r
+expect INQUIRY ok
+send dd if=/dev/random of=/tmp/p bs=1m count=32 2>/dev/null; echo "RAN""DOM ok"\r
+expect RANDOM ok
+send dd if=/tmp/p of=/dev/da0 bs=64k 2>/dev/null; dd if=/dev/da0 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A0 ok"\r
+expect DA0 ok
+send dd if=/tmp/p of=/dev/da8 bs=64k 2>/dev/null; dd if=/dev/da8 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A8 ok"\r
+expect DA8 ok
+send sysctl -n hw.busdma.edge_bounces | sed 's/^/BOUN''CES /'\r
+expect BOUNCES
+send sysctl -n hw.busdma.audit_reports | sed 's/^/AUD''IT /'\r
+expect AUDIT 0
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

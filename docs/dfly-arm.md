@@ -1650,9 +1650,12 @@ checked against the fork at `1bc64454c4`.
   and EMMC2 and GENET reference them.
 - MSI and a second-interrupt-controller layer (Phase 5). `gic_msi_*` return
   EOPNOTSUPP, and nexus maps only the GIC; brcmstb PCIe needs both.
-- Bouncing of buffers that share cache lines (5c, review O6). Only the
-  `dma-ranges` half was done in 5g; this is needed before GENET RX and
-  umass sense buffers.
+- ~~Bouncing of buffers that share cache lines (5c, review O6).~~ Done
+  2026-10-05 (`6638e1b964`): every tag on a non-coherent system bounces
+  pieces that are not aligned to the cache writeback granule
+  (`hw.busdma.bounce_edge`, `dma_align`, `edge_bounces`). `edge.exp`
+  passes 25/25 under `hw.busdma.debug=3`; umass bounces its CBW and CSW on
+  every command.
 
 **Wanted early on the Pi (debugging):**
 - DDB (Phases 1 and 2). It is off in `ARM64_VIRT` until `db_interface.c`,

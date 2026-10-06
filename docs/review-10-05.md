@@ -301,6 +301,7 @@ Progress 5f and 5g.
 | Reset without PSCI | `cpu_reset_hook`, provided by `bcmwd` | `63d6773139`, `1f260d2c87` | compile only |
 | RTC | PL031 started and written back (`resettodr`); never earlier than the root fs time; `rc.d/savetime`; `dntpd -s` by default, right after NETWORKING | `63d6773139`, `1bc64454c4` | `time.exp` 23/23, `ntp.exp` 20/20 |
 | `dfly-arm.md` stale | Brought up to date (Progress 5f, 5g) | dfly docs | — |
+| O6 | Pieces of a load not aligned to the cache writeback granule (CTR_EL0.CWG, 64 on the A72) bounce on every non-coherent tag; copies go through the DMAP; `hw.busdma.bounce_edge=0` turns it off | `6638e1b964` | `edge.exp` 25/25 (`debug=3`), and with `bounce_edge=0` no edge bounces |
 
 ### Fixed, not fully tested
 
@@ -324,7 +325,6 @@ Progress 5f and 5g.
 |---|---|---|
 | S2, S3, S5–S8 | Unchanged | Phase 9 |
 | S4, S9, S10 | Unchanged, low priority | — |
-| O6 | Edge cache lines are still cleaned and invalidated at POSTREAD; no cache-line bounce | Phase 6, before GENET RX and umass sense buffers |
 | O9 | Unaudited | Phase 6 drivers |
 | P3 (MSI) | No MSI; needs the brcmstb controller and a second-controller layer | Phase 6 step 4 |
 | P4 | No UAS | later |
