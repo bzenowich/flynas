@@ -1,0 +1,28 @@
+# vmexpect.py script for run-storage.sh EXP=msi.exp (review-10-05 P3):
+# MSI and MSI-X through QEMU virt's GICv2m frame (MSI irqs 64-127).
+# virtio-blk-pci takes two MSI-X vectors and AHCI one MSI; qemu-xhci
+# has only MSI-X, which xhci_pci does not use, so it stays on INTx.
+# Moves data through the AHCI disk and the root disk, then checks that
+# both devices took interrupts on MSI irqs and that the data and the
+# busdma audit are right.
+# Markers are split in the commands so the echoed command lines cannot
+# match.
+expect login:
+send root\r
+expect #
+send exec /bin/sh\r
+expect #
+send dmesg | grep -c 'GICv2m at' | sed 's/^/V''2M /'\r
+expect V2M 1
+send dd if=/dev/random of=/tmp/p bs=1m count=32 2>/dev/null; dd if=/tmp/p of=/dev/da0 bs=64k 2>/dev/null; dd if=/dev/da0 bs=64k count=512 2>/dev/null | cmp - /tmp/p && echo "D""A0 ok"\r
+expect DA0 ok
+send vmstat -iv\r
+expect #
+send vmstat -iv | awk '$1 ~ /^irq/ { n = substr($1, 4) + 0; if (n >= 64 && n < 128 && $(NF-1) > 0) print $3 }' | sort -u | paste -s -d' ' - | sed 's/^/MSI''DEVS /'\r
+expect MSIDEVS ahci0 virtio_pci0
+send sysctl -n hw.busdma.audit_reports | sed 's/^/AUD''IT /'\r
+expect AUDIT 0
+send echo "AL""L done"\r
+expect ALL done
+send shutdown -p now\r
+expect Uptime:

@@ -1648,8 +1648,12 @@ checked against the fork at `1bc64454c4`.
 **Blocks Phase 6:**
 - Minimal clk / regulator / hwreset / syscon (Phase 5). Nothing exists yet,
   and EMMC2 and GENET reference them.
-- MSI and a second-interrupt-controller layer (Phase 5). `gic_msi_*` return
-  EOPNOTSUPP, and nexus maps only the GIC; brcmstb PCIe needs both.
+- MSI and a second-interrupt-controller layer (Phase 5). The MSI half
+  is done for GICv2m (2026-10-05, `b949b806bd`): the generic ECAM bridge
+  passes MSI/MSI-X to `gic.c`, virtio-blk-pci takes one MSI-X vector per
+  queue and AHCI an MSI (`msi.exp` 19/19; `intr.exp` now sees 4 cpus).
+  Still open: the second-controller layer (nexus maps only the GIC) and
+  brcmstb's own MSI controller behind it; the Pi 4 has no GICv2m.
 - ~~Bouncing of buffers that share cache lines (5c, review O6).~~ Done
   2026-10-05 (`6638e1b964`): every tag on a non-coherent system bounces
   pieces that are not aligned to the cache writeback granule
