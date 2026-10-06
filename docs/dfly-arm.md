@@ -571,9 +571,8 @@ to do, at low priority (`nice`, one job).
   - `arm-kbuild` always wipes the objdir. For incremental work, run bmake in
     `tools/kobj/ARM64_VIRT` with the same variables, and rerun config(8) into
     that directory without the `rm`.
-- **Not done:** an x86_64 rebuild in h2dev for the two MI header changes.
-  Both are preprocessor-only and inert on x86: the disklabel32 condition is
-  unchanged for x86, and `EM_res183` had no users. Run it before upstreaming.
+- ~~**Not done:** an x86_64 rebuild in h2dev for the two MI header changes.~~
+  Done with the Phase 2 x86 check of `6bfd5cc205` (2026-10-02).
 
 ### Phase 2 — pmap, exceptions, timer, interrupts: single CPU to `init` (≈8–12 wk)
 
@@ -822,7 +821,8 @@ static ELF that does a `write` syscall and `exit`.
     on the cross-built world (see Progress 4b).
   - The ASID rollover path is not exercised yet (one user process).
   - The spin-table path is untested until the Pi.
-  - All SPIs still go to cpu 0.
+  - ~~All SPIs still go to cpu 0.~~ Spread over the cpus since
+    `db037a5749` (Progress 5g).
   - No `cpu_send_ipiq_passive`.
   - `detect_cpu_topology` is empty: the hwid functions do the work.
 
@@ -1435,7 +1435,8 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
     qemu-xhci (`da8`; umass disks are numbered from da8). Booted with
     `hw.busdma.debug=3`, each disk gets 32 MB written and read back, and
     the audit stays at 0.
-- **x86 check pending:** the MI changes (`DRIVER_MODULE` virtio_mmio,
+- ~~**x86 check pending:**~~ (done 2026-10-04 at `52d1c56856`, Progress 5e)
+  the MI changes (`DRIVER_MODULE` virtio_mmio,
   `pci_pci.c`, `pci.c`, `virtio_pci.c`, ahci, xhci, `vm_page.c`) need a
   build and boot on h2dev with `bin/arm-x86build`.
 - Later: MSI through GICv2m.
@@ -1490,8 +1491,9 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   `tests/v3/run_all.sh`. `R6GROUPS=` picks groups (not `GROUPS`, a bash
   builtin). Result: **65 pass, 0 fail**, groups A–L (incl. resilver, EIO
   injection, scrub, read-path self-heal), no panics.
-- **x86 check pending** now also covers `kern_dmsg.c` and the overlay
-  built against master.
+- ~~**x86 check pending** now also covers `kern_dmsg.c` and the overlay
+  built against master.~~ Done: the fork check above covers `kern_dmsg.c`,
+  and the overlay runs 123/0 on x86 (Progress 5f).
 
 **Progress 5f (2026-10-04 – 10-05): suite rewrite, two arm64 bugs, review fixes.**
 - **The 65/65 above was vacuous.** An audit against mdadm's tests found
@@ -1636,6 +1638,70 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
     covers P2/R4.
   - h2dev's 12.6 GB root filled up during the build. Old crash dumps
     and `/usr/obj` were deleted to make room.
+
+#### Still open from Phases 1–5 (audited 2026-10-05)
+
+Every exit test from Phase 0 through Phase 5 passed. These items were
+planned or found along the way and are not done. Code-level items were
+checked against the fork at `1bc64454c4`.
+
+**Blocks Phase 6:**
+- Minimal clk / regulator / hwreset / syscon (Phase 5). Nothing exists yet,
+  and EMMC2 and GENET reference them.
+- MSI and a second-interrupt-controller layer (Phase 5). `gic_msi_*` return
+  EOPNOTSUPP, and nexus maps only the GIC; brcmstb PCIe needs both.
+- Bouncing of buffers that share cache lines (5c, review O6). Only the
+  `dma-ranges` half was done in 5g; this is needed before GENET RX and
+  umass sense buffers.
+
+**Wanted early on the Pi (debugging):**
+- DDB (Phases 1 and 2). It is off in `ARM64_VIRT` until `db_interface.c`,
+  `db_trace.c` and `setjmp` exist; panics print a frame-pointer backtrace
+  only.
+- Crash dumps (Phase 2). `md_dumpsys` reports that dumps are unsupported,
+  and libkvm can't read them.
+- PL011 as a proper `dev/serial` driver (Phase 5). Optional: the early
+  tty in `early_uart.c` works on the Pi's PL011.
+
+**Planned work not done:**
+- `fpu_kern_enter` (Phase 2). The kernel builds with `-mgeneral-regs-only`.
+  This blocks NEON RAID6 parity (review P5).
+- Kernel modules (Phase 2, deferred to Phase 7). `conf/kmod.mk` links
+  non-x86 modules `-Bshareable`, which `link_elf_obj` rejects, and
+  `sys/modules` isn't built for aarch64. hammer2 is compiled in.
+- ptrace debug registers and `PT_STEP` (Phase 2); no gdb or lldb is built.
+- `pmap_fault_page_quick` and `pmap_object_init_pt` are stubs (Phase 2).
+  These are performance only.
+- Lazy FPU switching (Phase 2, optional).
+- `cpu_send_ipiq_passive` is declared but not implemented (Phase 3); MI
+  code doesn't call it today.
+- The ABI review against upstream (Phase 4, "before anything ships").
+  `ucontext.h` and `tls.h` are still marked PROVISIONAL.
+- A native toolchain (Phase 4). The clang patch was only tested at driver
+  level, and no LLVM is built for the target. Phase 8 plan (a) needs it.
+
+**Written but never run:**
+- ASID rollover (`vm.pmap.asid_max`, Phase 3). Multi-user now makes this
+  testable on QEMU.
+- The spin-table AP start, EL2 entry and early cache clean (Phases 1 and
+  3). These run only on the Pi.
+- Core dumps (Phases 2 and 4): the register fill exists.
+- A real `make buildworld` on a DragonFly host (Phase 4).
+  `bin/arm-buildworld` stands in for it, and the cross-tools list still
+  names GNU binutils.
+- RAID6 on umass/xhci (Phase 5 exit test). It ran on virtio only.
+- From 5g: a non-zero DMA bus offset, `bcmwd`, `bcmrng`, and the real NTP
+  pool.
+
+**x86 follow-ups:**
+- The rtld link (`-lc_rtld_pic`), libkvm and xz's link need a full x86
+  buildworld of the fork (4b). h2dev's master buildworld on 2026-10-04
+  built upstream master plus the overlay, not the fork.
+- `timeout(1)` fails at start with `sigaction(32)` on master and on the
+  fork (5e). Not investigated.
+
+**Dropped:** the full enumeration of missing machine headers (Phase 0
+exit note). Phase 1 made it moot.
 
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
