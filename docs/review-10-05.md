@@ -203,22 +203,49 @@ FreeBSD `critical_enter`.
 
 ### Phase 6 prerequisites not yet in the tree
 
-- `dma-ranges` support, `get_dma_tag` passing tags from bus to child, `lowaddr`
-  0x3c000000 (PCIe) / 1 GB (EMMC2 on B0), and cache-line bounce (R5, O6).
-- A second-interrupt-controller layer in nexus/`gic_abi` for the brcmstb MSI
-  controller and its INTx.
-- brcmstb PCIe host driver (`pci_host_generic` is ECAM-only), plus the VL805
-  "notify xhci reset" mailbox call.
-- Mailbox and firmware-property drivers (clocks, power domains, MAC address,
-  board revision); fixed-clock/clk stubs.
-- EMMC2: MI sdhci has only ACPI and PCI attachments; needs an FDT/bcm2711
-  attachment and the mmc bus.
-- GENET: no `sys/dev/netif/genet`; the BCM54213PE PHY is not in `miidevs`.
-- PM watchdog/reset, rng200, thermal, bcm2835 GPIO (MI `bus/gpio` exists), cpufreq.
-- Optional: a mini-UART fallback (only `arm,pl011` is matched).
-- Phase 6 step 7 (checksum-heavy I/O) is the first real test of cache
-  maintenance and ordering. Run the `asid_max` rollover test and RAID6-on-umass
-  there too.
+Scope revised 2026-10-06 for the actual target: a stock Pi 4B booting
+from microSD, 4–6 SSDs on a USB 3 hub (Sabrent VL715 USB/SATA adapters),
+management over Gigabit Ethernet only. No sound, HDMI, GPIO or
+Wi-Fi/BT.
+
+**Done:**
+- ~~`dma-ranges`, `get_dma_tag`, `lowaddr` (R5)~~ `ad8d0da4f7`; ~~cache-line
+  bounce (O6)~~ `6638e1b964`.
+- ~~Second-interrupt-controller layer~~ `65f3c9b141` (the brcmstb MSI
+  controller that plugs into it comes with the PCIe driver, and is
+  optional: INTx is enough for the one VL805).
+- ~~Fixed-clock/clk stubs~~ `95b5a62304` (clk, regulator, hwreset,
+  syscon).
+- ~~PM watchdog/reset~~ (`bcmwd`), ~~rng200~~ (`bcmrng`).
+
+**Required:**
+- brcmstb PCIe host driver. The USB 3 ports are the VL805 behind the
+  SoC's only PCIe lane, so without it there are no USB disks at all.
+  INTx first, the MSI controller later.
+- A minimal firmware mailbox, for one call: VL805 "notify xhci reset".
+  Boards without a VL805 EEPROM need the firmware to load the VL805's
+  firmware after every PCIe reset. No full firmware-property driver.
+- GENET + BCM54213PE PHY (the only management path). The MAC address
+  comes from the DT `local-mac-address`.
+- EMMC2: an FDT attachment for `brcm,bcm2711-emmc2` on the MI sdhci,
+  `mmc` and `mmcsd` code, for root on the SD card.
+
+**Wanted:** the thermal sensor (`brcm,bcm2711-thermal`), one register
+read, for the dashboard. The firmware throttles on its own regardless.
+
+**Dropped:** GPIO (the firmware sets pin functions; the ACT LED is not
+worth a driver), the mini-UART (`dtoverlay=disable-bt` puts the PL011 on
+GPIO14/15), cpufreq (the firmware sets the clock; `config.txt` if
+needed), the full firmware-property driver, sound, HDMI/VC4.
+
+**Hardware risk, not a driver:** the VL715 adapters run BOT (Linux
+forces it), and whether they honour cache flushes is unknown. Test them
+on a Linux host before trusting RAID6 to them.
+
+**Testing:** QEMU has no Pi 4 machine. PCIe, GENET and thermal can only
+be compile-checked and reviewed here. The MI sdhci/mmc/mmcsd stack can be
+run on QEMU `virt` through `sdhci-pci`. Phase 6 step 7 (checksum-heavy
+I/O, `asid_max` rollover, RAID6 on umass) needs the Pi.
 
 ## 6. Recommended order
 
@@ -335,4 +362,4 @@ Progress 5f and 5g.
 | Crash dumps, DDB | Both done 2026-10-05 (`ddb.exp` 53/53, `dump.exp` 34/34) | kgdb later |
 | ~~`fpu_kern_enter`, kernel modules~~ (done), ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver | Unchanged (§5) | Phases 6–9 as listed there |
 | Thermal, cpufreq | Not started | Phase 6 housekeeping |
-| Other Phase 6 prerequisites | brcmstb PCIe + VL805, mailbox, EMMC2 FDT attachment, GENET + PHY, GPIO, mini-UART | Phase 6 |
+| Other Phase 6 prerequisites | brcmstb PCIe (INTx; MSI later) + VL805 mailbox call, EMMC2 FDT attachment, GENET + BCM54213PE, thermal. GPIO, mini-UART, cpufreq dropped (scope 2026-10-06) | Phase 6 |

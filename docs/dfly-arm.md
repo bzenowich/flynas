@@ -1803,6 +1803,11 @@ exit note). Phase 1 made it moot.
 
 ### Phase 6 — Raspberry Pi 4 bring-up (≈6–10 wk)
 
+Target hardware (decided 2026-10-06): a stock Pi 4B booting from
+microSD, 4–6 SSDs on a USB 3 hub through Sabrent USB/SATA adapters
+(VIA VL715), management over Gigabit Ethernet only. No sound, HDMI, GPIO
+or Wi-Fi/BT. The driver list below is cut to what that needs.
+
 Order matters: console, then SD, then USB, then network.
 
 1. **Boot and console.**
@@ -1813,9 +1818,10 @@ Order matters: console, then SD, then USB, then network.
      54 MHz.
    - Spin-table SMP.
    - Use an md root at first.
-2. **Firmware mailbox and firmware property driver** (`bcm2835_mbox.c`,
-   `bcm2835_firmware.c`): clock rates, power domains, board revision and
-   MAC address.
+2. **Firmware mailbox, minimal** (`bcm2835_mbox.c`): only the property
+   channel, for the VL805 `NOTIFY_XHCI_RESET` call in step 4. The MAC
+   address comes from the DT, clock rates from the DT, and the firmware
+   powers the blocks we use; no firmware-property driver.
 3. **EMMC2 SD:** DragonFly `dev/disk/sdhci` plus FreeBSD's `bcm2711-emmc2`
    attachment. Respect the 1 GB DMA window on B0 silicon (from DT
    `dma-ranges`). Then root on SD (UFS or HAMMER2).
@@ -1836,7 +1842,7 @@ Order matters: console, then SD, then USB, then network.
    - The MAC address comes from the DT `local-mac-address` (firmware fills it
      in) or the mailbox.
 6. **Housekeeping:**
-   - GPIO for the activity LED as a disk/heartbeat indicator.
+   - ~~GPIO for the activity LED~~: dropped (no GPIO use on this NAS).
    - `bcm2711-rng200` feeding `kern_nrandom`: written (`bcmrng`,
      Progress 5g); check that it attaches and harvests.
    - Watchdog, for `reboot` via PM_RSTC or PSCI: written (`bcmwd`,
@@ -1844,7 +1850,10 @@ Order matters: console, then SD, then USB, then network.
    - Time: with no RTC, enable `savetime` and check that `dntpd -s` sets
      the clock from the pool at boot (Progress 5g).
    - Thermal sensor (`brcm,bcm2711-thermal`) for the FlyNAS dashboard.
-   - cpufreq via the mailbox: optional.
+   - ~~cpufreq via the mailbox~~: dropped; the firmware sets the clock
+     (`config.txt` if it turns out too low).
+   - ~~Mini-UART~~: dropped; `dtoverlay=disable-bt` puts the PL011 on
+     GPIO14/15.
 7. **8 GB board:** run with the RAM above 960 MB enabled and confirm that
    bounce buffers work under sustained USB load. **Use `md5`/`b3sum` over
    large files.** Silent corruption is the failure mode FreeBSD hit.
