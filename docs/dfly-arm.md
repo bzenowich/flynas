@@ -29,7 +29,9 @@ fixes is in Progress 5f. The Pi groundwork that QEMU can test is in
 Progress 5g: DMA windows and bouncing, interrupt spreading, faster copy
 routines, async parity writes, pulled-disk handling, RTC write-back, and
 dntpd setting the clock at boot. The watchdog and RNG drivers are
-written. Next: Phase 6.
+written. The Phase 6 drivers (mailbox, PCIe, GENET + PHY, EMMC2,
+thermal) are written and compile-tested (Progress 6a). Next: boot on
+the board.
 
 Goal: boot a DragonFly BSD kernel and userland on a Raspberry Pi 4 Model B
 (BCM2711), with HAMMER2 (including our RAID6 patch) on USB 3 disks and
@@ -1821,10 +1823,12 @@ Order matters: console, then SD, then USB, then network.
 2. **Firmware mailbox, minimal** (`bcm2835_mbox.c`): only the property
    channel, for the VL805 `NOTIFY_XHCI_RESET` call in step 4. The MAC
    address comes from the DT, clock rates from the DT, and the firmware
-   powers the blocks we use; no firmware-property driver.
+   powers the blocks we use; no firmware-property driver. Written
+   (`bcmmbox`, Progress 6a).
 3. **EMMC2 SD:** DragonFly `dev/disk/sdhci` plus FreeBSD's `bcm2711-emmc2`
    attachment. Respect the 1 GB DMA window on B0 silicon (from DT
-   `dma-ranges`). Then root on SD (UFS or HAMMER2).
+   `dma-ranges`). Then root on SD (UFS or HAMMER2). Written
+   (`sdhci_bcm`, Progress 6a).
 4. **PCIe + VL805 + USB 3:**
    - Port `bcm2838_pci.c`, keeping its 960 MB inbound clamp. It includes the
      internal MSI controller as a PIC for `gic_abi`.
@@ -1833,6 +1837,8 @@ Order matters: console, then SD, then USB, then network.
    - DragonFly's u4b `xhci` + `umass` then gives us USB disks. Test UAS
      enclosures separately: DragonFly u4b UAS support is limited, so use
      BOT/umass at first.
+   - Written (`pci_brcmstb.c`, Progress 6a), INTx only; MSI is still
+     to do.
 5. **GENET:**
    - Port `if_genet.c` to `sys/dev/netif/genet/`. Adapt it to DragonFly's
      ifnet: `ifq` serializers, `IFNET_SERIALIZE_ALL`, `if_start` vs
@@ -1841,6 +1847,7 @@ Order matters: console, then SD, then USB, then network.
      otherwise add the ID).
    - The MAC address comes from the DT `local-mac-address` (firmware fills it
      in) or the mailbox.
+   - Written (`if_genet.c` and `brgphy` delay support, Progress 6a).
 6. **Housekeeping:**
    - ~~GPIO for the activity LED~~: dropped (no GPIO use on this NAS).
    - `bcm2711-rng200` feeding `kern_nrandom`: written (`bcmrng`,
@@ -1849,7 +1856,8 @@ Order matters: console, then SD, then USB, then network.
      Progress 5g); check `reboot` and a watchdog timeout.
    - Time: with no RTC, enable `savetime` and check that `dntpd -s` sets
      the clock from the pool at boot (Progress 5g).
-   - Thermal sensor (`brcm,bcm2711-thermal`) for the FlyNAS dashboard.
+   - Thermal sensor (`brcm,bcm2711-thermal`) for the FlyNAS dashboard:
+     written (`bcmtemp`, Progress 6a).
    - ~~cpufreq via the mailbox~~: dropped; the firmware sets the clock
      (`config.txt` if it turns out too low).
    - ~~Mini-UART~~: dropped; `dtoverlay=disable-bt` puts the PL011 on
@@ -1857,6 +1865,60 @@ Order matters: console, then SD, then USB, then network.
 7. **8 GB board:** run with the RAM above 960 MB enabled and confirm that
    bounce buffers work under sustained USB load. **Use `md5`/`b3sum` over
    large files.** Silent corruption is the failure mode FreeBSD hit.
+
+**Progress 6a (2026-10-06): the Phase 6 drivers, written and
+compile-tested** (fork 168f903f5f). None of them can run under QEMU,
+which has no BCM2711 model. They are first exercised on the board.
+New kernel config `ARM64_RPI4`; `ARM64_VIRT` is unchanged.
+- **Mailbox** (`dev/misc/bcmmbox`):
+  - Polled, property channel only, with one 256-byte coherent buffer
+    under a lock. Its bus address comes from the `/soc` `dma-ranges`
+    (phys 0 is bus 0xC0000000).
+  - Calls: `notify_xhci_reset`, plus `get_clock_rate`, which EMMC2
+    uses only as a fallback.
+- **PCIe** (`bus/pci/pci_brcmstb.c`, a subclass of the generic FDT
+  host):
+  - Resets the RC, opens an 8 GB inbound window, and waits up to
+    200 ms for link.
+  - Sets up the one outbound window, and programs the root port's bus
+    numbers and memory window itself (DragonFly's `pci_pci` only reads
+    them).
+  - If the VL805 shows no firmware, it calls `notify_xhci_reset` before
+    the `pci` child attaches, so `xhci` needs no Pi-specific code.
+  - Child DMA is clamped below 960 MB (tunable `hw.bcm_pcib.dma_limit`).
+  - INTx only for now; MSI returns ENXIO.
+- **GENET** (`dev/netif/genet`):
+  - DragonFly ifnet: arpcom, serializer interrupt, `if_start` and a
+    watchdog.
+  - One RX and one TX ring on queue 16, with no checksum offload.
+  - `phy-mode` becomes `MIIF_RX_DELAY`/`MIIF_TX_DELAY` for the PHY.
+  - The MAC address comes from the DT, then the UMAC registers, then a
+    random locally administered one.
+  - Fixed relative to FreeBSD:
+    - A TX mbuf (and its map) is kept with the last descriptor.
+    - The RX error and no-mbuf paths advance the consumer index.
+    - RX loads into a spare map first.
+- **PHY** (MI: `miidevs`, `miivar.h`, `mii.c`, `brgphy.c`):
+  - BCM54213PE is matched by `brgphy`.
+  - `mii_probe_args.mii_flags` now reaches the PHY; it was dropped
+    before.
+  - New `MIIF_RX_DELAY`/`MIIF_TX_DELAY` flags set the BCM54xx RGMII RX
+    skew and GTXCLK delay.
+- **EMMC2** (`dev/disk/sdhci/sdhci_fdt_bcm.c`):
+  - DragonFly's sdhci core with SDMA, through the windowed tag, so the
+    emmc2bus `dma-ranges` apply.
+  - 32-bit register access, with block and command shadowing (as
+    FreeBSD does).
+  - UHS and 1.8 V signalling are off (the vqmmc regulator is not
+    driven), so cards run at High Speed, 50 MHz.
+  - `broken-cd` means the card is always present.
+  - `mmc` attaches to it (one line in `mmc.c`).
+- **Thermal** (`dev/powermng/bcmtemp`):
+  - Attaches to the AVS monitor and reads its temperature register.
+  - Uses the coefficients from `/thermal-zones/cpu-thermal`.
+  - The result is `hw.sensors.bcmtemp0.temp0`.
+- The x86 check of the MI changes (mii, brgphy, mmc) passed: quickkernel
+  `X86_64_GENERIC` rebuilt all three with no warnings.
 
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
