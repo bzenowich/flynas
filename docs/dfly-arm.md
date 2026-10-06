@@ -1038,7 +1038,7 @@ with `sshd`.
     - librecrypto: `OPENSSL_NO_ASM` off x86_64.
     - liblzma: `immintrin.h` only on x86.
     - libevtr: an aarch64 `va_list` built over the saved argument block.
-    - libkvm: `kvm_aarch64.c`, no crash dumps yet; `kvm_proc.c` includes
+    - libkvm: `kvm_aarch64.c` (reads minidumps since 2026-10-05); `kvm_proc.c` includes
       `<machine/pmap.h>`.
     - libefivar: `MDE_CPU_AARCH64`, and `machine/efi.h` from FreeBSD's
       arm64 (an ABI header).
@@ -1641,6 +1641,21 @@ qemu-xhci + usb-storage works. Run the HAMMER2 RAID6 test suite from
   - h2dev's 12.6 GB root filled up during the build. Old crash dumps
     and `/usr/obj` were deleted to make room.
 
+**Progress 5h (2026-10-05 – 10-06): DDB, crash dumps, NEON RAID6, modules.**
+All four items from the "Wanted early" and "Planned work" lists below are
+done; details are under each item there.
+- DDB (fork `36de9246c1`): `ddb.exp` 53/53.
+- Crash dumps (fork `f95b22cfd2`, MI USB fix `c5f71a54bd`): `dump.exp`
+  34/34.
+- `kernel_fpu_begin`/`end` (fork `97d400bcaf`) and NEON RAID6 parity
+  (hammer2-raid6 `2215aaf`, patch `e39e239`): groups A–E, K, L pass
+  with `vfs.hammer2.raid6_simd=1`.
+- Kernel modules (fork `32b778cd9c`, `497385bdd7`): all of
+  `sys/modules` builds; `kmod.exp` 31/31.
+- The MI changes since the last x86 check (`usb_controller.c`,
+  `vm_page.c`, `kerneldump.h`, `kmod.mk`, `kern.pre.mk`, `cryptoapi.c`,
+  module Makefiles, `re.c`) still need `bin/arm-x86build`.
+
 #### Still open from Phases 1–5 (audited 2026-10-05)
 
 Every exit test from Phase 0 through Phase 5 passed. These items were
@@ -1699,17 +1714,59 @@ checked against the fork at `1bc64454c4`.
     `reset`.
   - Tests that panic now stop at a `db>` prompt instead of spinning. Both
     end at the VM timeout.
-- Crash dumps (Phase 2). `md_dumpsys` reports that dumps are unsupported,
-  and libkvm can't read them.
+- ~~Crash dumps (Phase 2).~~ Done 2026-10-05 (fork `f95b22cfd2`): a
+  minidump of the kernel page tables and every page in the `vm_page_dump`
+  bitmap; `savecore` writes `vmcore.0` and libkvm (`kvm_aarch64.c`) walks
+  the dumped L0–L3 tables from `kernl0pa`, so `dmesg -M` and `ps -M` work.
+  - `dump_avail` is every DMAP range, taken before the kernel image and
+    `pmap_bootstrap` pages are subtracted from `phys_avail`, or libkvm
+    can't find the kernel's own translation tables.
+  - With no loader, `parse_bootargs` supplies
+    `kernelname=/boot/kernel/kernel` unless the bootargs name one, so
+    `kern.bootfile` (and savecore's kernel match) is right.
+  - **MI fix found along the way** (`c5f71a54bd`): a panic inside a sysctl
+    handler hung the reboot, because `usb_shutdown` detaches the device
+    tree and `sysctl_ctx_free` waits for the sysctl lock the panicking
+    thread holds shared. `usb_shutdown` now returns early when
+    `panicstr != NULL`.
+  - Test: `dump.exp` (`run-storage.sh DUMPSIZE=512m ROOTSIZE=800m
+    ARM_VM_REBOOT=1`) passes 34/34: panic, dump, reboot, savecore,
+    `dmesg -M` and `ps -M` on the vmcore.
 - PL011 as a proper `dev/serial` driver (Phase 5). Optional: the early
   tty in `early_uart.c` works on the Pi's PL011.
 
 **Planned work not done:**
-- `fpu_kern_enter` (Phase 2). The kernel builds with `-mgeneral-regs-only`.
-  This blocks NEON RAID6 parity (review P5).
-- Kernel modules (Phase 2, deferred to Phase 7). `conf/kmod.mk` links
-  non-x86 modules `-Bshareable`, which `link_elf_obj` rejects, and
-  `sys/modules` isn't built for aarch64. hammer2 is compiled in.
+- ~~`fpu_kern_enter` (Phase 2).~~ Done 2026-10-05 (fork `97d400bcaf`) as
+  DragonFly's `kernel_fpu_begin()`/`kernel_fpu_end()`: a critical
+  section, `TDF_KERNELFP`, the thread's user FP state saved to its pcb and
+  FPCR zeroed; `kernel_fpu_end` reloads it. The kernel still builds with
+  `-mgeneral-regs-only`, so SIMD code is assembly
+  (`.arch_extension simd`).
+- ~~NEON RAID6 parity (review P5).~~ Done 2026-10-06 (hammer2-raid6
+  `2215aaf`): parity and recovery are column-wise over two primitives,
+  `hammer2_raid6_xor` and `hammer2_raid6_mul` (multiply-accumulate by a
+  GF(2^8) constant). On aarch64 they run 64-byte NEON steps in
+  `hammer2_raid6_neon.S` (split-nibble `tbl`), C for the tail. A boot
+  self-test checks all 256 constants against C and falls back on a
+  mismatch; `vfs.hammer2.raid6_simd` shows the choice. Tests: host math
+  check 2256 recoveries vs the old code; arm64 guest with SIMD on, groups
+  A–E, K, L pass. Not yet measured on real hardware (TCG timings mean
+  nothing).
+- ~~Kernel modules (Phase 2, deferred to Phase 7).~~ Done 2026-10-06
+  (fork `32b778cd9c`, `497385bdd7`): `kmod.mk` links aarch64 modules
+  `-r` like x86_64, and all 309 modules in `sys/modules` build
+  (`bin/arm-kbuild -n ARM64_VIRT modules-depend modules -j2`).
+  - Fixes: `kmod.mk` generated no `*_if.c` when the kernel objdir had
+    one (MI; x86 only escaped by build order); `-m aarch64elf` for
+    firmware blobs; AES-NI, `pcf`, `mxge`, `sym` x86_64-only; `re`'s
+    CMAC bus tag. `bin/arm-hosttools` builds `uudecode` for the
+    firmware modules.
+  - Test: `kmod.exp` (`KMODS=1 ROOTSIZE=600m run-storage.sh ... -- -s 2`)
+    31/31: msdos load, FAT mount, unload, reload, then 19 more modules
+    loaded and unloaded (dm_target_crypt pulls in dm and crypto).
+  - Build but can't load yet (missing subsystems): `smbacpi`,
+    `gpio_acpi`, `gpio_intel`, `sdhci_acpi`, `ig4` (ACPI), `nataisa`
+    (ISA PnP), `ukbd` (kbd), `uaudio` (sound).
 - ptrace debug registers and `PT_STEP` (Phase 2); no gdb or lldb is built.
 - `pmap_fault_page_quick` and `pmap_object_init_pt` are stubs (Phase 2).
   These are performance only.
@@ -1808,8 +1865,8 @@ scrubs and survives a pulled disk.
     mitigation), and a normal ESP.
   - Cons of pftf: its 3 GB toggle, and its default of ACPI mode.
   - Choose one and document it in `docs/`.
-- Kernel modules on aarch64 (`kmod.mk` link mode, `link_elf_obj.c`
-  relocations `R_AARCH64_*`).
+- ~~Kernel modules on aarch64~~ (done 2026-10-06); installkernel still
+  has to install them.
 - A `release/` script that produces an SD image: FAT (Pi firmware +
   `config.txt` + U-Boot or EDK2 + `EFI/BOOT/BOOTAA64.EFI`) followed by a
   DragonFly root. HAMMER2 root needs `vfs.root.mountfrom` support from the
@@ -1852,9 +1909,9 @@ DragonFly install onto a USB disk.
   - Watch endianness assumptions (none expected: little-endian both sides),
     alignment of on-disk structs read via casts (aarch64 tolerates unaligned
     normal-memory access), and the cost of xxhash64/CRC on the A72.
-  - Optional later: NEON GF(2^8) multiply for RAID6 Q parity using the
-    split-nibble `tbl` lookup (plain ASIMD; PMULL is not available on the
-    BCM2711), via `fpu_kern_enter`.
+  - ~~Optional later: NEON GF(2^8) multiply for RAID6 Q parity~~ Done
+    2026-10-06 (split-nibble `tbl`, `kernel_fpu_begin`); measure it on the
+    Pi.
 
 **Exit:** `install.sh` completes on the Pi, the full `tools/uitest/run-all.sh`
 suite passes against it (minus VM-app tests), and the bitrot self-heal test
@@ -1869,8 +1926,8 @@ set (A–L in `../hammer2-raid6/docs/bitrot.md`) passes on USB disks.
 - Raise the PCIe DMA window toward 3 GB once we understand the 960 MB
   corruption that FreeBSD reported. Bounce copying is the throughput ceiling
   for USB disks on 4 GB and 8 GB boards.
-- ~~An `ddb` aarch64 disassembler~~ (done 2026-10-05), plus `kgdb` and
-  `minidump` support.
+- ~~An `ddb` aarch64 disassembler~~ (done 2026-10-05) and ~~`minidump`
+  support~~ (done 2026-10-05), plus `kgdb`.
 - Upstreaming: offer the MI cleanups and then the port to DragonFly (and
   claim the bounty).
 

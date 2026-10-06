@@ -52,8 +52,8 @@ therefore invisible to the suites run so far (RAID6 123/0 on mmio and pci,
   - all interrupts on one core.
 - **Phase gaps:**
   - a user-triggerable panic (`sysarch`);
-  - crash dumps panic;
-  - no DDB;
+  - ~~crash dumps panic~~ (done 2026-10-05);
+  - ~~no DDB~~ (done 2026-10-05);
   - several Pi hardware services are missing.
 
 ## 1. SMP and locking
@@ -161,7 +161,7 @@ FreeBSD `critical_enter`.
 | P2 | High | Each row seal writes P, then Q, with synchronous `bwrite()`. Metadata is mirrored synchronously to every other disk, one at a time. With bulk-only umass (one command per disk) this costs several serial USB round trips per row and leaves the other disks idle. | `local_hammer2_raid6.c:475-484`, `:532+` | issue P, Q and mirror writes asynchronously (`bio_done`) and wait once. Early Phase 6 |
 | P3 | High | All interrupts are on cpu0 and there is no MSI (= S1). xHCI (all four disks) and GENET share one of the four cores. | `gic.c:385`, `:394` | per-irq ITARGETSR through MachIntrABI; spread xHCI and the 2 GENET irqs; brcmstb MSI controller. Phase 6 |
 | P4 | Med | No UAS: `bus/u4b/storage` has only umass, urio and ustorage_fs, so each disk handles one command at a time. 4a accepts this, but P2 makes it worse. | `bus/u4b/storage/` | later |
-| P5 | Med | RAID6 parity does a 64 KB `gf_mul_table` lookup per byte, inside byte loops. The table is twice the A72's 32 KB L1D. | `local_hammer2_raid6.h:83`; `local_hammer2_raid6.c:132-138`, `:469-471` | NEON `tbl` nibble method, which needs `fpu_kern_enter` (G5); interim: 64-bit word-at-a-time multiply-by-2 (Horner). Phase 9 |
+| P5 | Med | **Done 2026-10-06** (hammer2-raid6 `2215aaf`: column-wise math, NEON `tbl` under `kernel_fpu_begin`). RAID6 parity does a 64 KB `gf_mul_table` lookup per byte, inside byte loops. The table is twice the A72's 32 KB L1D. | `local_hammer2_raid6.h:83`; `local_hammer2_raid6.c:132-138`, `:469-471` | NEON `tbl` nibble method, which needs `fpu_kern_enter` (G5); interim: 64-bit word-at-a-time multiply-by-2 (Horner). Phase 9 |
 | P6 | Med | `MAXPHYS` is 128 KB, matching `UMASS_BULK_SIZE`; fine for USB, though larger I/O would cut per-command overhead. The bounce pool is `MAX_BPAGES 1024` = 4 MB; 4a wants 16–32 MB once DMA is clamped to 960 MB. | `cpu/aarch64/include/param.h:109`, `busdma_machdep.c:84` | raise for Pi boards |
 | P7 | Low | No ARMv8 CRC32 instruction path: `libkern/icrc32.c` uses slicing-by-8 tables, and only metadata uses icrc32. Data checks use scalar xxhash64, which is fine. The timer is one-shot at stock `hz`, not tickless. Buffer-cache sizing copies x86 with 2 TB of KVA, which is fine for 4–8 GB. | — | optional |
 
@@ -173,10 +173,10 @@ FreeBSD `critical_enter`.
 |---|---|---|---|---|
 | `sys_sysarch` is a panicking stub, reachable by any user as syscall 165 | 2 | bug **[checked]** | `platform/arm64/aarch64/stubs.c:56`; `kern/syscalls.master:237` | **High** (local DoS) |
 | `cpu_set_iopl`/`cpu_clr_iopl` panic, so opening `/dev/io` as root panics | 2 | bug **[checked]** | `stubs.c:52-53`; `kern/kern_memio.c:193` | Med |
-| `md_dumpsys` panics: setting `dumpdev` turns a panic into a recursive panic. No minidump, and libkvm can't read dumps; Phase 9 lists only minidump and kgdb | 2 | missing **[checked]** | `stubs.c:61` | **High** for a server |
+| ~~`md_dumpsys` panics: setting `dumpdev` turns a panic into a recursive panic. No minidump, and libkvm can't read dumps~~ **Done 2026-10-05** (fork `f95b22cfd2`, MI USB fix `c5f71a54bd`): minidump, savecore, libkvm; `dump.exp` 34/34 | 2 | done | `dump_machdep.c`, `kvm_aarch64.c` | — |
 | ~~DDB is off, so a panic prints only a frame-pointer backtrace. Phase 9 schedules only the disassembler~~ **Done 2026-10-05** (fork `36de9246c1`): DDB, A64 disassembler, embedded symbol table; `ddb.exp` 53/53 | 1/2 | done | `db_interface.c`, `db_trace.c`, `db_disasm.c` | — |
-| `fpu_kern_enter` (promised in Phase 2) does not exist; the kernel is `-mgeneral-regs-only` | 2 | missing | `conf/kern.mk:12` | Med (blocks NEON RAID6) |
-| Kernel modules: `kmod.mk` links aarch64 modules `-Bshareable` (ET_DYN), which `link_elf_obj` rejects. `sys/modules` is not built; only a hand-linked test module was loaded. hammer2 is compiled in | 2 | partial (tracked for Phase 7) | `conf/kmod.mk:205-215` | Med |
+| ~~`fpu_kern_enter` (promised in Phase 2) does not exist~~ **Done 2026-10-05** (fork `97d400bcaf`) as `kernel_fpu_begin()`/`kernel_fpu_end()`; the kernel stays `-mgeneral-regs-only`, SIMD is assembly | 2 | done | `machdep.c` | — |
+| ~~Kernel modules: `kmod.mk` links aarch64 modules `-Bshareable` (ET_DYN), which `link_elf_obj` rejects. `sys/modules` is not built~~ **Done 2026-10-06** (fork `32b778cd9c`, `497385bdd7`): `-r` link, all 309 modules build, `kmod.exp` 31/31 loads 20 and unloads them | 2 | done | `conf/kmod.mk` | — |
 | ptrace: debug registers and `PT_STEP` return EINVAL; no gdb/lldb is built | 2 | partial | `machdep.c:1218`; `procfs_machdep.c:98-106` | Low |
 | Core dumps: register fill exists, never tested | 2/4 | untested | `kern/imgact_elf.c:1465` | Low |
 | Signals: the handler's fault address comes from the last user fault even for non-fault signals | 2 | edge case | `machdep.c` `sendsig` (`tf_far`) | Low |
@@ -269,10 +269,10 @@ FreeBSD `critical_enter`.
      also passed: `X86_64_GENERIC` with all modules builds and boots in
      h2dev, and `dntpd` builds with `-Werror`.
 4. **Phase 9:**
-   - P5 NEON parity (after `fpu_kern_enter`);
+   - ~~P5 NEON parity (after `fpu_kern_enter`)~~ done 2026-10-06;
    - S2/S3 finer pmap locking and batched TLBI;
    - S5–S8;
-   - DDB and crash dumps if not done earlier.
+   - ~~DDB and crash dumps if not done earlier~~ both done 2026-10-05.
 
 ## 7. Status by finding (2026-10-05)
 
@@ -329,10 +329,10 @@ Progress 5f and 5g.
 | O9 | Unaudited | Phase 6 drivers |
 | P3 (MSI) | GICv2m MSI/MSI-X done (`b949b806bd`, `msi.exp` 19/19); second-controller layer done (`65f3c9b141`, `intrc.exp` 23/23); still needs the brcmstb MSI controller | Phase 6 step 4 |
 | P4 | No UAS | later |
-| P5 | Per-byte table parity; needs `fpu_kern_enter` | Phase 9 |
+| P5 | Done 2026-10-06: NEON parity, self-test, `vfs.hammer2.raid6_simd`; RAID6 groups A–E, K, L pass with SIMD on | Measure on the Pi |
 | P6 (`MAXPHYS`) | Still 128 KB | later |
 | P7 | Unchanged | — |
-| Crash dumps, DDB | DDB done 2026-10-05 (`ddb.exp` 53/53); no dump support yet | Crash dumps in progress |
-| `fpu_kern_enter`, kernel modules, ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver | Unchanged (§5) | Phases 6–9 as listed there |
+| Crash dumps, DDB | Both done 2026-10-05 (`ddb.exp` 53/53, `dump.exp` 34/34) | kgdb later |
+| ~~`fpu_kern_enter`, kernel modules~~ (done), ptrace, core dumps, ASID rollover, provisional ABI, native compiler, PL011 driver | Unchanged (§5) | Phases 6–9 as listed there |
 | Thermal, cpufreq | Not started | Phase 6 housekeeping |
 | Other Phase 6 prerequisites | brcmstb PCIe + VL805, mailbox, EMMC2 FDT attachment, GENET + PHY, GPIO, mini-UART | Phase 6 |

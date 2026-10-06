@@ -18,6 +18,8 @@
 #   localedef usr.bin/localedef (share/*def: the BSD locale format, which
 #           glibc's localedef doesn't write)
 #   mkcsmapper, mkesdb  usr.bin/mk* (share/i18n: citrus iconv tables)
+#   uudecode usr.bin/uudecode (firmware modules unpack their .fw.uu files;
+#           Linux hosts may not have sharutils)
 #
 #   bin/arm-hosttools          build (re-run after pulling upstream)
 #   bin/arm-hosttools --clean  remove tools/host
@@ -143,6 +145,7 @@ cat > "$l/bsdlib.h" <<'EOF2'
 #define	_sigprocmask	sigprocmask
 char	*fgetln(FILE *, size_t *);
 void	 errc(int, int, const char *, ...);
+void	 warnc(int, const char *, ...);
 void	 setprogname(const char *);
 int	 issetugid(void);
 void	*reallocf(void *, size_t);
@@ -185,6 +188,17 @@ errc(int eval, int code, const char *fmt, ...)
 	va_start(ap, fmt);
 	errno = code;
 	verr(eval, fmt, ap);
+}
+
+void
+warnc(int code, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	errno = code;
+	vwarn(fmt, ap);
+	va_end(ap);
 }
 
 void
@@ -393,6 +407,14 @@ for t in mkcsmapper mkesdb; do
         "$c/citrus_lookup_factory.c" $pf "$l/hostlib.c"
     $CC -o "$BIN/$t" "$o"/obj/*.o
 done
+
+# --- uudecode ----------------------------------------------------------------
+# b64_pton (-m) is in glibc's libresolv.
+echo "==> uudecode"
+XF=
+hcomp "$OUT/build/uudecode" "$SRC/usr.bin/uudecode/uudecode.c" \
+    "$SRC/lib/libc/gen/setmode.c" "$l/hostlib.c"
+$CC -o "$BIN/uudecode" "$OUT"/build/uudecode/*.o -lresolv
 
 echo "==> host tools in $BIN:"
 ls "$BIN"

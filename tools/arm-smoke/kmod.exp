@@ -1,7 +1,11 @@
 # vmexpect.py script for run-storage.sh KMODS=1 EXP=kmod.exp (with -- -s 2)
 # Kernel modules: kldload msdos.ko by name from /boot/kernel (an ET_REL
 # object relocated by link_elf_obj against the kernel's .dynsym), use it
-# for a real FAT filesystem on the AHCI disk, then kldunload it.
+# for a real FAT filesystem on the AHCI disk, then kldunload it.  Then
+# load a spread of modules not compiled into ARM64_VIRT (filesystems,
+# dm + crypto pulled in as dependencies of dm_target_crypt, network,
+# wlan, PCI NIC drivers that find no device, HAMMER) and unload them
+# all again.
 # Markers are split in the commands so the echoed command lines cannot
 # match.
 expect login:
@@ -23,6 +27,14 @@ send kldunload msdos && echo N=$(kldstat | grep -c msdos.ko)\r
 expect N=0
 send kldload msdos && echo "RE""LOAD ok"\r
 expect RELOAD ok
+send f=0; for m in dm_target_crypt ext2fs udf ntfs fuse zlib if_bridge if_tun if_vlan if_lagg pf ipfw wlan_ccmp if_re if_em ehci smbfs nfs hammer; do kldload $m || f=$((f+1)); done; echo LF=$f\r
+expect LF=0
+send kldstat | egrep -c ' (dm|crypto|wlan)[.]ko' | sed 's/^/D''EPS /'\r
+expect DEPS 3
+send f=0; for m in hammer nfs smbfs ehci if_em if_re wlan_ccmp ipfw pf if_lagg if_vlan if_tun if_bridge zlib fuse ntfs udf ext2fs dm_target_crypt; do kldunload $m || f=$((f+1)); done; echo UF=$f\r
+expect UF=0
+send kldstat | sed 1d | grep -vc 'kernel$' | sed 's/^/L''EFT /'\r
+expect LEFT 1
 send echo "AL""L done"\r
 expect ALL done
 send shutdown -p now\r
