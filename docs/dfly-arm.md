@@ -1652,9 +1652,9 @@ done; details are under each item there.
   with `vfs.hammer2.raid6_simd=1`.
 - Kernel modules (fork `32b778cd9c`, `497385bdd7`): all of
   `sys/modules` builds; `kmod.exp` 31/31.
-- The MI changes since the last x86 check (`usb_controller.c`,
-  `vm_page.c`, `kerneldump.h`, `kmod.mk`, `kern.pre.mk`, `cryptoapi.c`,
-  module Makefiles, `re.c`) still need `bin/arm-x86build`.
+- x86 check passed 2026-10-06 at fork `497385bdd7`: `bin/arm-x86build
+  build` (X86_64_GENERIC with all modules, 16 min; the usb module
+  regenerated its own `usb_if.c`) and `boottest`.
 
 #### Still open from Phases 1–5 (audited 2026-10-05)
 
