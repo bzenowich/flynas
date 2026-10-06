@@ -1,7 +1,8 @@
 # vmexpect.py script for run-raid6.sh: log in and run the hammer2 RAID6
 # suite on vbd1-vbd4.  run-raid6.sh fills in the group list.  The marker
 # is split in the command so the echoed command line cannot match, and
-# only "rc=0" counts as a pass.
+# only "rc=0" counts as a pass.  SIMD 1: the NEON parity loops passed
+# their boot self-test against the C ones.
 expect login:
 send root\r
 expect ~ #
@@ -9,5 +10,7 @@ send exec /bin/sh\r
 expect #
 send ls /dev/vbd1 /dev/vbd2 /dev/vbd3 /dev/vbd4 | wc -l | sed 's/^ */D''ISKS /'\r
 expect DISKS 4
+send sysctl -n vfs.hammer2.raid6_simd | sed 's/^/S''IMD /'\r
+expect SIMD 1
 send cd /root/hammer2-tests/v3 && sh run_all.sh @GROUPS@; echo "SUI""TE rc=$?"\r
 expect SUITE rc=0
