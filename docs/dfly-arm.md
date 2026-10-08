@@ -2005,6 +2005,38 @@ SD image** (fork 43e16b689c):
 - **Harmless:** "simplebus0: cannot map interrupt 0..5" (twice) is the
   two HDMI nodes behind the `bcm2711-l2-intc`, which we don't drive.
 
+**Progress 6d (2026-10-07): on the network.**
+- **Network and management:** DHCP gave 192.168.25.194. ssh as root
+  works with the `arm-pisd` key, and the host key matches
+  `tools/pisd/hostkeys`.
+- **Kernel update:** the newer kernel went onto the card over ssh
+  (mount `/boot/firmware`; the old one is kept as `kernel8-old.img`).
+  - DragonFly's msdosfs shows a renamed file in upper case
+    (`KERNEL8.IMG`); the firmware doesn't care.
+- **Temperature sensor:** with that kernel, `hw.sensors.bcmtemp0.temp0`
+  reads about 48 °C (SoC).
+- **USB hub:** a Sabrent HB-UMP3 shows up as a Genesys GL3510 pair. The
+  USB3 half (`05e3:0626`) is at SuperSpeed on a VL805 root port. The USB2
+  half (`05e3:0610`) hangs off the VL805's internal 2109 hub.
+- **Bug: lost USB device nodes.** Toggling the hub's per-port power
+  buttons re-attached it at the same address before the bus cleanup had
+  destroyed the old cdev. devfs refused the new names, then deleted the
+  old ones, so there was no `/dev/ugen0.3` and `usbconfig` couldn't see
+  the hub. Fixed in fork `7c880b4be8`: `usb_destroy_dev()` now calls
+  `destroy_dev()` at once; it is asynchronous and ordered on the devfs
+  thread. Waiting for a re-test with the buttons.
+- **Bug: clock never set at boot.** There's no RTC, so the clock started
+  33 h behind. dntpd ran before dhclient wrote `resolv.conf`, and libc's
+  resolver reads that file only once, so dntpd never resolved a server
+  until it was restarted. Fixed in fork `483243dcd9`: `res_init()` after
+  a failed `getaddrinfo()`.
+  - Test: with `resolv.conf` hidden for the first 4 s, the new dntpd
+    stepped the clock 33 h. On a reboot the quickset logs its COARSE
+    adjustment.
+  - The image's dntpd had predated `1bc64454c4` (no `-w`). It has been
+    rebuilt shared, and `root-md.img` was pushed to the card.
+- **x86 check:** both fixes are MI and still need `bin/arm-x86build`.
+
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
 scrubs and survives a pulled disk.
