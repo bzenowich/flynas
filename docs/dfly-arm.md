@@ -2037,7 +2037,8 @@ SD image** (fork 43e16b689c):
   - The image's dntpd had predated `1bc64454c4` (no `-w`). It has been
     rebuilt shared, and `root-md.img` was pushed to the card.
 - **x86 check:** these fixes are MI and still need `bin/arm-x86build`
-  (`7c880b4be8`, `483243dcd9`, `3329cd2b82`, `7fb14d2f57`).
+  (`7c880b4be8`, `483243dcd9`, `3329cd2b82`, `7fb14d2f57`,
+  `ee4cdd762a`).
 - **SD root:** the firmware read the 300 MB `root-md.img` at about
   11.5 MB/s, which took 26 s. The card now boots the SD root
   (`rootmode-sd`/`cmdline-sd`).
@@ -2080,6 +2081,43 @@ SD image** (fork 43e16b689c):
     plus `options USB_DEBUG`, for the next USB problem.
 - **Open:** `timeout(1)` on the Pi fails with "sigaction(32): Invalid
   argument".
+
+**Progress 6e (2026-10-07): USB disk throughput.** Two 238 GB SSDs on
+the HB-UMP3 (da8 JMicron, da9 Sabrent), bulk-only transport, raw `dd`.
+The PCIe link is Gen2 x1, MPS 128.
+- **Interrupt routing works:** ttyu0 on cpu 0, genet0 on 1, sdhci on 2,
+  xhci0 on 3.
+- **IMOD:** fork `ee4cdd762a` adds `dev.xhci.N.imod`. At 125 µs (500, the
+  default) 4K reads at QD1 got 10.9 MB/s; at 40 µs (160, Linux's value)
+  they got 24.9 MB/s. The default is unchanged for now.
+- **Profile** (`options DEBUG_PCTRACK`, `kern.pctrack`) of a two-drive
+  read at 240 MB/s: 37% memcpy (busdma bounce copies), 25% copyout
+  (raw-device physio), 16% cache maintenance. The usbus0 thread used 57%
+  of one cpu.
+- **Bounces:** pci_brcmstb bounced all DMA above 960 MB, a limit taken
+  from FreeBSD. The real limit is the outbound window at PCI
+  0xc0000000: 3 GB, as in the DT's dma-ranges and on Linux.
+  - Fork `a5a83a6113` makes 3 GB the default. Integrity check: 6 raw and
+    12 UFS passes of 1 GB of random data read back intact.
+  - On 8 GB, RAM above 3 GB still bounces.
+  - Fork `557ab145b6` adds the `hw.physmem` tunable. At
+    `hw.physmem=2g` (1893 MB available, like a 2 GB Pi), memcpy left the
+    profile; copyout is 57%.
+- **MAXPHYS:** fork `f34976c0cf` raises it to 1 MB on arm64, as Linux
+  uses for SuperSpeed disks. iostat shows 1024 KB/t. On its own it
+  barely changed throughput: the cost is per byte, not per command.
+
+| raw dd, MB/s | before (960 MB, 128K) | 3 GB, 1M, 8 GB RAM | `hw.physmem=2g` |
+|---|---|---|---|
+| read 1M, one drive | 160 | 169 | 226 |
+| read 64K | 126 | 140 | 174 |
+| read 4K QD1 (imod 160) | 24.9 | — | 25.1 |
+| read, both drives | 240 | 255 | 305 |
+| write 1M, one drive | 149 | 145 | 176 |
+| write, both drives | 218 | 210 | 248 |
+
+- **Open:** whether to move the inbound window above 4 GB in PCI space
+  so that all 8 GB is reachable (the VL805 does 64-bit DMA); UAS.
 
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
