@@ -2024,7 +2024,8 @@ SD image** (fork 43e16b689c):
   old ones, so there was no `/dev/ugen0.3` and `usbconfig` couldn't see
   the hub. Fixed in fork `7c880b4be8`: `usb_destroy_dev()` now calls
   `destroy_dev()` at once; it is asynchronous and ordered on the devfs
-  thread. Waiting for a re-test with the buttons.
+  thread. Verified on the board: the hub dropped and re-attached at the
+  same addresses, and all of `/dev/ugen0.1`–`0.6` survived.
 - **Bug: clock never set at boot.** There's no RTC, so the clock started
   33 h behind. dntpd ran before dhclient wrote `resolv.conf`, and libc's
   resolver reads that file only once, so dntpd never resolved a server
@@ -2035,7 +2036,8 @@ SD image** (fork 43e16b689c):
     adjustment.
   - The image's dntpd had predated `1bc64454c4` (no `-w`). It has been
     rebuilt shared, and `root-md.img` was pushed to the card.
-- **x86 check:** both fixes are MI and still need `bin/arm-x86build`.
+- **x86 check:** these fixes are MI and still need `bin/arm-x86build`
+  (`7c880b4be8`, `483243dcd9`, `3329cd2b82`, `7fb14d2f57`).
 - **SD root:** the firmware read the 300 MB `root-md.img` at about
   11.5 MB/s, which took 26 s. The card now boots the SD root
   (`rootmode-sd`/`cmdline-sd`).
@@ -2048,16 +2050,34 @@ SD image** (fork 43e16b689c):
   now blinks with traffic, and the amber one stays lit.
 - **USB disks:** a JMicron JMS578 (`152d:0578`, fw 32.02) on the
   HB-UMP3 hub attaches as `da8` (238 GB, SuperSpeed).
-  - **Sabrent JMS578 (`152d:a578`, fw 2.14):** umass attaches, but no
-    `da` appears, either at hot-plug or at boot. `camcontrol rescan`
-    generates no USB traffic. After `usbconfig -d X.Y reset` it attaches
-    normally.
-  - **Suspect:** umass is stuck with a ccb in flight and returns busy
-    for everything after it. Not proven; that needs a `USB_DEBUG`
-    kernel.
+  - **Bug: Sabrent JMS578 (`152d:a578`, fw 2.14) never got a disk.**
+    umass attached, but every command timed out, both at boot and after
+    a hot-plug. `usbconfig -d X.Y reset` fixed it by hand. It was not the
+    drive: the same drive worked on the JMicron.
+  - **Cause:** a `USB_DEBUG` kernel and a trace of each xHCI command
+    showed it. The first Address Device (SET_ADDRESS) after power-on
+    completes after about 630 ms with completion code 19, a context
+    state error.
+    - The slot stays in Default state at address 0. `usb_alloc_device()`
+      ignored the error, which is fine when SET_ADDRESS is a plain
+      control request. Control requests at address 0 still work, so the
+      device attached, but its bulk endpoints could never be configured.
+    - After that, the VL805 rejected every Address Device for the device
+      at once. Port resets, Reset Device and a fresh slot (Disable Slot
+      plus Enable Slot) didn't help, and neither did 90 s of retries.
+    - It recovered only after a control request at address 0. The manual
+      reset worked because umass's BBB resets had sent some by then.
+  - **Fixed in fork `7fb14d2f57`:**
+    - When a controller that sets the address itself fails, the stack
+      now resets the port, reads 8 bytes of the device descriptor at
+      address 0, and retries SET_ADDRESS once.
+    - Address Device now gets 5 s, as on Linux, not 500 ms, so the slow
+      failure completes instead of aborting the command ring.
+    - Result: the Sabrent attaches at boot as `da9`, 238 GB.
   - **Ruled out:** the VL805 bulk-OUT burst quirk
-    (`XHCI_VLI_SS_BULK_OUT_BUG`); bursts work after the reset.
-  - For now the user is using JMicron adapters instead.
+    (`XHCI_VLI_SS_BULK_OUT_BUG`).
+  - `sys/config/ARM64_RPI4_USBDEBUG` (fork, uncommitted) is ARM64_RPI4
+    plus `options USB_DEBUG`, for the next USB problem.
 - **Open:** `timeout(1)` on the Pi fails with "sigaction(32): Invalid
   argument".
 
