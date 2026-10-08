@@ -8,3 +8,5 @@ ui/reference/
 !tools/arm-smoke/
 !tools/llvm/
 logs/
+/console.log
+/serial-in.sock
