@@ -2207,6 +2207,16 @@ restriction. Both disks attach as `da0`/`da1` at `uas0`/`uas1` with
     and was caught only by the CCB timeout (60 s). The default stays at
     8K, where neither kind of stall has been seen. A progress watchdog
     shorter than the CCB timeout would bound this; it is not done.
+  - **Size, not total bytes.** Tested whether the bridge simply holds
+    about 64K of read data, so that reads in flight may add up to 64K.
+    Method: `in_overlap=-1`, fixed-size random reads, N threads, all
+    four disks, 120 s per run. 8K × 7 (56K) ran clean at 26 MB/s each.
+    Every overlap of reads over 8K stalled every disk:
+    16K × 2 (32K total), 16K × 3/4/5/7, 32K × 2 (64K), 32K × 3, 64K × 2.
+    The trigger is a read over 8K overlapping another read, however
+    little data is in flight, so the per-read rule stays. One of the
+    ~30 recoveries failed (`reset failed (USB_ERR_IOERROR)`), fell back
+    to re-attach as designed, and its open descriptor got EINVAL.
 - **Open:** a progress watchdog for silent stalls; the full product
   test at 2 GB.
 
