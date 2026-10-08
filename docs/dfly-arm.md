@@ -2163,9 +2163,52 @@ restriction. Both disks attach as `da0`/`da1` at `uas0`/`uas1` with
   onto fresh UFS and 4 read-backs after a remount: all 16 sha256 match,
   0 stream resets, no errors.
 - **x86 check pending:** `7d0304c631`, `3483a53ae5` (xhci),
-  `20bd09d601` (cam), `41a27691b7` (umass, uas module).
-- **Open:** in-place error recovery; maybe a per-device `in_overlap`
-  quirk; the full product test at 2 GB.
+  `20bd09d601` (cam), `41a27691b7` and `0cf56b73f6` (umass, uas module).
+- **In-place recovery** (fork `0cf56b73f6`, 2026-10-08). The test rig is
+  now four Sabrent JMS578s (`152d:a578`, fw 2.14), da0–da3, on the
+  Genesys hub.
+  - **How it works:** a stall freezes the SIM queue and hands the
+    outstanding commands back to CAM. The failed one spends a retry;
+    the rest are requeued. A task then:
+    1. resets the hub port (`usbd_req_re_enumerate`);
+    2. restores SET_CONFIGURATION and the UAS alternate setting;
+    3. marks the four endpoints halted, so xhci rebuilds their stream
+       contexts on the next transfer.
+
+    Then the queue is released and CAM replays the commands on the
+    **same da unit**. Re-enumeration is now only the fallback when the
+    reset fails.
+  - **Locking:** `usbd_do_request()` takes the enumeration lock of the
+    device it talks to, so the port reset needs the parent hub's lock.
+    The hub thread holds the hub's lock while it takes the child's. The
+    task therefore takes hub then device, polling (`LK_NOWAIT`), and
+    gives up when detach (which holds both and drains the task) sets
+    `sc_gone`. The first version took only the device's lock and
+    deadlocked against hub explore.
+  - **Per-device limit:** `dev.uas.N.in_overlap` starts at
+    `hw.usb.uas.in_overlap`. It halves when a reset finds two or more
+    reads moving data, and `dev.uas.N.resets` counts recoveries. Halving
+    the *limit* matters: halving the largest read in flight gave
+    2K–4K, because the hang is noticed late and its reads may be gone.
+  - **Results:**
+    - Forced storm (`in_overlap=-1`, 64K reads QD8 on all four disks
+      while UFS was written and read back): 1968 in-place resets.
+      All 12 files matched their sha256, with no I/O errors, no lost
+      devices and no unit changes.
+    - With learning, starting from 32K and mixed 4K–1M reads at QD8,
+      every disk went 32K → 16K → 8K within 30 s (2–3 resets each).
+      It then ran 60 s at about 50 MB/s each with no further resets.
+      From -1 with 64K reads, a single reset to 32K, then 84 MB/s each.
+    - Detach race: 18 recoveries plus 3 `usbconfig reset`s during a
+      storm on da2. No panic; da2 came back as da2 each time, while
+      da0 ran at 111 MB/s with 0 resets.
+    - Regression at the defaults: integ2 16/16, 0 stream resets.
+  - **Silent stalls:** above 8K, a stall sometimes raised no xhci event
+    and was caught only by the CCB timeout (60 s). The default stays at
+    8K, where neither kind of stall has been seen. A progress watchdog
+    shorter than the CCB timeout would bound this; it is not done.
+- **Open:** a progress watchdog for silent stalls; the full product
+  test at 2 GB.
 
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
