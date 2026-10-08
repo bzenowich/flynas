@@ -1981,6 +1981,30 @@ SD image** (fork 43e16b689c):
   - `include`, `initramfs`, and the load address;
   - whether it reads our FAT.
 
+**Progress 6c (2026-10-07): first boot on the board** (8 GB Pi 4B rev
+1.5, `tools/pisd/pi-boot.log`). The md-root image boots multi-user to a
+`login:` on the PL011.
+- **Firmware:** it handled everything as planned. It reads our FAT,
+  follows `include rootmode.txt`, loads the 300 MB initramfs at
+  0x1c400000, applies `disable-bt` and puts `kernel8.img` at 0x200000.
+  Reading `root-md.img` takes about 26 s.
+- **Kernel start:** entered at EL2. 8052 MB of RAM, 4 CPUs by
+  spin-table, GIC-400, and a 54 MHz timer.
+- **Attached:** `bcmmbox`, `bcmwd`, `bcmrng`.
+- **EMMC2:** `sdhci_bcm` → `mmcsd0`, a 29 GB SDHC card at 50 MHz,
+  4-bit.
+- **PCIe:** the link came up at 5 GT/s, and the VL805 shows up as
+  `xhci0` on INTx (64-bit DMA). Its hubs enumerate.
+- **Ethernet:** `genet0` + `brgphy0`, with the MAC from the DT.
+- **rc:** dhclient, sshd, dntpd and cron start.
+- **Not yet seen:** a DHCP lease (`genet0` said "no carrier" when
+  dhclient started) and any umass disks (none were plugged in).
+- **Bug:** the AVS monitor attached as `syscon0` instead of `bcmtemp`.
+  DragonFly's `BUS_PROBE_*` are all 0, and the first 0 wins. Fixed in
+  fork `954f47ac43`: `fdt_syscon` now probes at -100.
+- **Harmless:** "simplebus0: cannot map interrupt 0..5" (twice) is the
+  two HDMI nodes behind the `bcm2711-l2-intc`, which we don't drive.
+
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
 scrubs and survives a pulled disk.
