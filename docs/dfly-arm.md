@@ -2217,6 +2217,18 @@ restriction. Both disks attach as `da0`/`da1` at `uas0`/`uas1` with
     little data is in flight, so the per-read rule stays. One of the
     ~30 recoveries failed (`reset failed (USB_ERR_IOERROR)`), fell back
     to re-attach as designed, and its open descriptor got EINVAL.
+  - **Cache flushes reach the SSDs.** Drives (ATA IDENTIFY through ATA
+    PASS-THROUGH(16), which the bridges pass): da0/da1 Samsung 850 EVO
+    250GB, da2/da3 Crucial BX500 240GB, all with the write cache on and
+    FLUSH CACHE EXT. A libcam tool timed SCSI SYNCHRONIZE CACHE against
+    ATA FLUSH CACHE EXT sent by pass-through, after bursts of random 4K
+    writes. The two cost the same at every step: 0.25 ms idle (a TEST
+    UNIT READY is 0.17), 0.65–2.9 ms after a single write. With the write
+    cache turned off (SET FEATURES 0x82), writes took 4–9× longer and
+    flushes fell back to idle cost. So the bridge turns SYNCHRONIZE CACHE
+    into a real drive flush. `kern.cam.da.N.sync_cache` is 1 on all four.
+    Whether the SSDs themselves honour it needs a power cut; neither
+    model has power-loss protection.
 - **Open:** a progress watchdog for silent stalls; the full product
   test at 2 GB.
 
