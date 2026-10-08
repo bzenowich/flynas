@@ -2229,6 +2229,24 @@ restriction. Both disks attach as `da0`/`da1` at `uas0`/`uas1` with
     into a real drive flush. `kern.cam.da.N.sync_cache` is 1 on all four.
     Whether the SSDs themselves honour it needs a power cut; neither
     model has power-loss protection.
+  - **hammer2-raid6 now flushes after the volume header.** Following the
+    flush path showed that each member got a BUF_CMD_FLUSH *before* its
+    volume header write, but none after it. So sync() could return
+    while the new header was still in the drive's write cache. A power
+    loss would then bring back the previous header and lose what that
+    sync committed. Each member now gets a flush after its header
+    `bwrite`, and all are waited for together, so the flushes overlap
+    (hammer2-raid6 `cd9eb78`, patch regenerated in `30d824c`). The
+    h2dev suite runs 123/0 with it. h2dev's disks are
+    `cache=writeback`, so `crash_host.sh` could never have caught the
+    gap; only a power cut on real disks would.
+  - **x86 check at fork `9fa9872c2a`.** `bin/arm-x86build` failed
+    first with gcc `-Werror=parentheses` in `xhci.c` (the stream
+    context address: `+` binds tighter than `|`, so the parentheses
+    change no behavior). With that fixed, the whole kernel and modules
+    (including `uas.ko` and `xhci.ko`) build as x86_64. `boottest`
+    booted `kernel.arm64mi` to multiuser on h2dev and returned to the
+    stock kernel.
 - **Open:** a progress watchdog for silent stalls; the full product
   test at 2 GB.
 
@@ -2565,6 +2583,8 @@ DragonFly hardware.
      `review-10-05.md` §6 items 1–3 are done and x86-checked
      (Progress 5f, 5g). Next: Phase 6 (Pi 4 bring-up). Item 4
      waits for Phase 9.
+   - Phase 6 is under way on a real Pi (Progress 6c–6f), x86-checked
+     again at `9fa9872c2a` (Progress 6f).
 5. In parallel, order hardware:
    - a Pi 4B (4 GB, C0 stepping preferred)
    - a 3.3 V USB-TTL serial cable
