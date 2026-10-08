@@ -2036,6 +2036,30 @@ SD image** (fork 43e16b689c):
   - The image's dntpd had predated `1bc64454c4` (no `-w`). It has been
     rebuilt shared, and `root-md.img` was pushed to the card.
 - **x86 check:** both fixes are MI and still need `bin/arm-x86build`.
+- **SD root:** the firmware read the 300 MB `root-md.img` at about
+  11.5 MB/s, which took 26 s. The card now boots the SD root
+  (`rootmode-sd`/`cmdline-sd`).
+  - Slice 2 was rewritten over ssh: `gzip -dc | dd of=/dev/mmcsd0s2`,
+    with the sha256 checked afterwards.
+  - From a reboot to ssh now takes 43 s, and `/` is `mmcsd0s2`.
+- **Ethernet LEDs:** they showed link only. Fixed in fork `3329cd2b82`:
+  brgphy now programs the BCM54213PE's LED1 and LED3 in multicolor
+  mode, as the DT's `led-modes <0 8>` asks. On the board the green LED
+  now blinks with traffic, and the amber one stays lit.
+- **USB disks:** a JMicron JMS578 (`152d:0578`, fw 32.02) on the
+  HB-UMP3 hub attaches as `da8` (238 GB, SuperSpeed).
+  - **Sabrent JMS578 (`152d:a578`, fw 2.14):** umass attaches, but no
+    `da` appears, either at hot-plug or at boot. `camcontrol rescan`
+    generates no USB traffic. After `usbconfig -d X.Y reset` it attaches
+    normally.
+  - **Suspect:** umass is stuck with a ccb in flight and returns busy
+    for everything after it. Not proven; that needs a `USB_DEBUG`
+    kernel.
+  - **Ruled out:** the VL805 bulk-OUT burst quirk
+    (`XHCI_VLI_SS_BULK_OUT_BUG`); bursts work after the reset.
+  - For now the user is using JMicron adapters instead.
+- **Open:** `timeout(1)` on the Pi fails with "sigaction(32): Invalid
+  argument".
 
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
