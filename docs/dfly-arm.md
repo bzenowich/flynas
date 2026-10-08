@@ -2117,7 +2117,55 @@ The PCIe link is Gen2 x1, MPS 128.
 | write, both drives | 218 | 210 | 248 |
 
 - **Open:** whether to move the inbound window above 4 GB in PCI space
-  so that all 8 GB is reachable (the VL805 does 64-bit DMA); UAS.
+  so that all 8 GB is reachable (the VL805 does 64-bit DMA).
+- Fork `7d0304c631` makes imod 160 (40 µs) the default.
+
+**Progress 6f (2026-10-08): UAS.** A new `uas` driver (fork
+`41a27691b7`) runs both JMS578 SSDs with tagged queueing over bulk
+streams. Linux gives up on this combination; here it works with one
+restriction. Both disks attach as `da0`/`da1` at `uas0`/`uas1` with
+"Command Queueing Enabled". `hw.usb.uas.enable=0` falls back to umass.
+- **xhci streams were broken** (fork `3483a53ae5`): stream context
+  entries lacked SCT/DCS, Set TR Dequeue lacked SCT, and the event
+  handler read the completion code as a stream ID. INQUIRY timed out.
+- **The VL805 + JMS578 limit:** when reads longer than 8K overlap, the
+  data-in stream stalls with a transfer-less event (xHCI §4.17.4).
+  da0 (fw 32.02) fails at 16K QD2, da1 (fw 2.14) at 64K QD8. Reads of
+  8K or less overlap fine at QD8; writes overlap at any size.
+  - `hw.usb.uas.in_overlap` (default 8192): a longer read waits until no
+    other read is in flight, and runs alone. -1 lifts the limit.
+  - xhci recovers a stalled stream endpoint with a soft Reset Endpoint
+    and escalates after 3 tries; `hw.usb.xhci.stream_resets` counts
+    them. With the limit in place it stays at 0.
+  - With `in_overlap=16384` the stall shows within a second; uas then
+    resets the device by re-enumerating it, and the disk comes back as
+    a **new da unit**. That is no good under a mounted filesystem or
+    RAID, so in-place recovery (abort task, then a port reset without a
+    detach) is still to do.
+- **CAM fix** (fork `20bd09d601`): `xpt_bus_deregister()` dispatched
+  queued CCBs without the send accounting, so a detaching SIM drove
+  `send_active` negative.
+- **Throughput** (`hw.physmem=2g`, random aligned I/O over 64 GB with
+  `rr`, one drive unless noted):
+
+| | BOT | UAS |
+|---|---|---|
+| 4K read QD1 | 25 | 18.6 (4550 IOPS) |
+| 4K read QD8 | — | 48 (11.7k IOPS) |
+| 8K read QD8 | — | 90 (11k IOPS) |
+| 64K read QD1 / QD8 | 174 (seq.) | 146 / 167 |
+| 1M read QD4 | 226 (seq.) | 299 |
+| mixed 4K–1M QD8, both drives, 60 s | — | 95 each |
+| write 64K–1M QD8, both drives | — | 126 each |
+
+- **Integrity:** on both drives at once, 4 concurrent raw writes of
+  768 MB of random data each, 4 concurrent read-backs, then 4 `cp`s
+  onto fresh UFS and 4 read-backs after a remount: all 16 sha256 match,
+  0 stream resets, no errors.
+- **x86 check pending:** `7d0304c631`, `3483a53ae5` (xhci),
+  `20bd09d601` (cam), `41a27691b7` (umass, uas module).
+- **Open:** in-place error recovery; maybe a per-device `in_overlap`
+  quirk; the full product test at 2 GB.
 
 **Exit:** the Pi 4 boots multi-user from SD, gets a DHCP lease on GENET,
 `sshd` works, and a 4-disk HAMMER2 RAID6 volume on a USB 3 hub mounts,
